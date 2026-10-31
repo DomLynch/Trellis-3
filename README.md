@@ -30,6 +30,8 @@ released, how jobs are run, and what happens to the mesh after decoding.
 | UV charts | 11–21K tiny charts ("confetti") | `--uv-cone-deg` / `--uv-smooth` passed to the chart clusterer (upstream 90 / 1) |
 | Run receipt | — | `<output>.receipt.json`: settings, input hash/size, output hashes, timings, peak RSS, versions |
 | Server memory guard | — | `serve.py --min-free-gb N` waits for free RAM before each job, fails the job after `--mem-wait` |
+| Full-res detail in the bake | mtlbvh can't take the 800K-face decoder mesh, so the bake only ever sees the 200K simplified copy | CPU nearest-surface index on the full mesh: texels snap onto it before colour sampling (KDTree path) and `--normal-map` bakes a tangent-space normal map from it (both paths) |
+| Colour match | `--gamma 2.2` overshoots (measured: 2.2 gives 0.53/0.45/0.40 vs photo 0.40/0.28/0.24) | `--gamma auto` solves the gamma that matches the texture's mean to the input photo; `--gamma 1.7` if you want it fixed |
 
 Weight sizes are the bf16/fp16 checkpoints on Hugging Face. The 1024 cascade
 never uses `tex_slat_flow_model_512`; the 512 pipeline never uses either
@@ -102,7 +104,10 @@ free RAM before starting a job instead of swapping. Every output gets a
 --no-stage-hooks          don't flush the MPS cache between stages
 --no-thermal-guard        don't wait for the CPU to cool
 --metallic-factor F       pin glTF metallicFactor (default 0.0; -1 keeps upstream's 1.0)
---gamma G                 apply 1/G to base colour on the Metal path (try 2.2 if dark)
+--gamma G|auto            apply 1/G to base colour on the Metal path; auto matches the photo (≈1.6–1.7 on heads)
+--normal-map              bake a normal map from the full-res decoder mesh (CPU, ~20 s at 2048)
+--normal-flip-v           flip V for the normal map if it looks vertically wrong (Metal UV convention unverified)
+--no-snap-hires           KDTree path: don't snap texels onto the full-res mesh
 --no-fix-winding          skip the winding pass before the bake
 --uv-cone-deg D           UV chart cone half-angle (upstream 90); larger = fewer charts
 --uv-smooth S             UV chart smoothing (upstream 1); larger = fewer charts
@@ -120,6 +125,17 @@ Explicit flags override the preset.
   trade resolution for memory. Still likely to swap on 24 GB.
 - `1536_cascade`: about 3.4× the voxels of 1024. Needs 64 GB+ in practice.
 - 4096 textures: 4× the texels of 2048 through the Metal baker. Untested.
+
+## Measured on a 24 GB M5 Air (31 Oct 2026, Demon 2 head, pipeline 512)
+
+| | upstream trellis-mac | Trellis-3 |
+|---|---|---|
+| Peak memory | 20.6 GB | **14.4 GB** (−30%) |
+| Wall time | ~6 min | ~8 min (being investigated — see AUDIT) |
+| Bake path | Metal | Metal |
+| Winding | ~half the faces flipped | fixed by the winding pass |
+| `--gamma 2.2` | — | too bright; 1.6–1.7 matches the photo → use `--gamma auto` |
+| `--uv-cone-deg 120 --uv-smooth 2` | — | no visible change in chart count |
 
 ## Hole filling semantics
 

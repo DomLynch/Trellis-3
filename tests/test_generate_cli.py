@@ -59,3 +59,9 @@ def test_main_missing_image_exits(tmp_path):
     with pytest.raises(SystemExit) as e:
         generate.main([str(tmp_path / "nope.png")])
     assert e.value.code == 1
+
+
+def test_gamma_arg_accepts_auto_and_float():
+    a = generate.build_parser().parse_args(["i.png", "--gamma", "auto"])
+    assert a.gamma == "auto"
+    assert generate.build_parser().parse_args(["i.png", "--gamma", "1.7"]).gamma == 1.7

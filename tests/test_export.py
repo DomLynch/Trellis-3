@@ -84,3 +84,44 @@ def test_metal_path_wiring(tmp_path, monkeypatch):
     assert seen["texture_size"] == 512
     assert seen["glb"].visual.material.metallicFactor == 0.0
     assert np.asarray(seen["glb"].visual.material.baseColorTexture)[0, 0, 0] > 100
+
+
+def test_metal_path_normal_map(tmp_path, monkeypatch):
+    import sys, types
+    import trellis3.export as ex
+
+    icos = trimesh.creation.icosphere(subdivisions=3, radius=0.5)
+    seen = {}
+
+    def to_glb(**kw):
+        # Mimic to_glb: unwrap (planar uv) and convert Y-up -> Z-up
+        v = kw["vertices"].numpy().copy()
+        f = kw["faces"].numpy()
+        uv = np.stack([np.arctan2(v[:, 1], v[:, 0]) / (2 * np.pi) + 0.5,
+                       np.arccos(np.clip(v[:, 2] / 0.5, -1, 1)) / np.pi], axis=1)
+        keep = np.ptp(uv[f][:, :, 0], axis=1) < 0.5
+        g = v.copy(); g[:, 1], g[:, 2] = v[:, 2].copy(), -v[:, 1].copy()
+        m = trimesh.Trimesh(g, f[keep], process=False)
+        m.visual = trimesh.visual.TextureVisuals(
+            uv=uv, material=trimesh.visual.material.PBRMaterial(
+                baseColorTexture=Image.fromarray(np.zeros((2, 2, 3), np.uint8))))
+        seen["glb"] = m
+        return m
+
+    pp = types.ModuleType("o_voxel.postprocess"); pp.to_glb = to_glb
+    ov = types.ModuleType("o_voxel"); ov.postprocess = pp
+    monkeypatch.setitem(sys.modules, "o_voxel", ov)
+    monkeypatch.setitem(sys.modules, "o_voxel.postprocess", pp)
+    monkeypatch.setattr(ex, "_metal_bake_available", lambda: True)
+    monkeypatch.setattr(ex, "_simplify", lambda v, f, t, log: (v, f))  # keep full mesh
+
+    m = _Mesh(np.asarray(icos.vertices), np.asarray(icos.faces))
+    m.attrs = torch.zeros((1, 6)); m.coords = torch.zeros((1, 3), dtype=torch.int32)
+    m.layout = {}; m.voxel_size = 1 / 512
+    out = export_mesh(m, str(tmp_path / "n"), texture_size=64, normal_map=True,
+                      fix_winding=False, log=lambda *_: None)
+    assert out["normal"].endswith("n_normal.png") and (tmp_path / "n_normal.png").exists()
+    tex = seen["glb"].visual.material.normalTexture
+    assert tex is not None and tex.size == (64, 64)
+    px = np.asarray(tex).reshape(-1, 3).astype(float)
+    assert px[:, 2].mean() > 200   # same sphere hi/lo -> mostly flat

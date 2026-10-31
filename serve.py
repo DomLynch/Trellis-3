@@ -12,7 +12,7 @@ memory and accepts jobs two ways:
       "preset": "draft", "pipeline_type": "1024_cascade", "steps": 8,
       "texture_size": 2048, "no_texture": false, "max_tokens": 49152,
       "metallic_factor": 0.0, "gamma": 2.2, "fix_winding": true,
-      "uv_cone_deg": 120, "uv_smooth": 2}
+      "uv_cone_deg": 120, "uv_smooth": 2, "normal_map": true}
 
   HTTP
       python serve.py --http 127.0.0.1:8765
@@ -71,6 +71,9 @@ def parse_job(spec, image, out_dir):
             "fix_winding": bool(spec.get("fix_winding", True)),
             "uv_cone_deg": spec.get("uv_cone_deg"),
             "uv_smooth": spec.get("uv_smooth"),
+            "normal_map": bool(spec.get("normal_map", False)),
+            "normal_flip_v": bool(spec.get("normal_flip_v", False)),
+            "snap_hires": bool(spec.get("snap_hires", True)),
         },
         **cfg,
     }
@@ -147,7 +150,8 @@ class JobServer:
                 t_gen = time.time() - t0
                 stem = output_stem(f"seed{seed}", job["out_dir"])
                 paths = export_mesh(mesh, stem, texture_size=job["texture_size"],
-                                    no_texture=job["no_texture"], log=self.log, **job["bake"])
+                                    no_texture=job["no_texture"], reference_image=job["image"],
+                                    log=self.log, **job["bake"])
                 paths["seed"] = seed
                 paths["seconds"] = round(time.time() - t0, 1)
                 if self.receipts:

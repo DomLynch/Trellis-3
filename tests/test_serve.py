@@ -166,7 +166,8 @@ def test_parse_job_bake_options(png):
     job = serve.parse_job({"metallic_factor": -1, "gamma": 2.2, "fix_winding": False,
                            "uv_cone_deg": 120}, png, "o")
     assert job["bake"] == {"metallic_factor": None, "gamma": 2.2, "fix_winding": False,
-                           "uv_cone_deg": 120, "uv_smooth": None}
+                           "uv_cone_deg": 120, "uv_smooth": None, "normal_map": False,
+                           "normal_flip_v": False, "snap_hires": True}
     assert serve.parse_job({}, png, "o")["bake"]["metallic_factor"] == 0.0
 
 

@@ -113,7 +113,7 @@ def _rasterize_uv_triangles(vertices, faces, uvs, texture_size):
 
 
 def bake_texture(vertices, faces, uvs, voxel_coords, voxel_attrs, origin, voxel_size,
-                 texture_size=2048, k_neighbors=8, **kwargs):
+                 texture_size=2048, k_neighbors=8, snap=None, **kwargs):
     """
     Bake voxel attributes into a UV-mapped texture.
 
@@ -155,6 +155,14 @@ def bake_texture(vertices, faces, uvs, voxel_coords, voxel_attrs, origin, voxel_
     positions, mask = _rasterize_uv_triangles(vertices, faces, uvs, texture_size)
     coverage = mask.sum() / (H * W) * 100
     print(f"    Coverage: {coverage:.1f}%, rasterized in {time.time() - t_rast:.1f}s")
+
+    # Trellis-3: snap texel positions from the simplified surface onto the
+    # full-resolution decoder mesh before sampling voxels (what the Metal
+    # bake's BVH does upstream; mtlbvh can't take the full mesh).
+    if snap is not None:
+        t_snap = time.time()
+        positions[mask] = snap.query(positions[mask])[0]
+        print(f"    Snapped to full-res mesh in {time.time() - t_snap:.1f}s")
 
     # For each valid texel, find k nearest voxels
     query_points = positions[mask]  # [M, 3]
@@ -234,7 +242,8 @@ def bake_texture(vertices, faces, uvs, voxel_coords, voxel_attrs, origin, voxel_
     return base_color_img, mr_img, current_mask
 
 
-def export_glb_with_texture(vertices, faces, uvs, base_color_img, mr_img=None, output_path="output.glb"):
+def export_glb_with_texture(vertices, faces, uvs, base_color_img, mr_img=None, output_path="output.glb",
+                            normal_img=None):
     """Export mesh with UV-mapped PBR textures as GLB."""
     import trimesh
     from PIL import Image
@@ -252,6 +261,9 @@ def export_glb_with_texture(vertices, faces, uvs, base_color_img, mr_img=None, o
     if mr_img is not None:
         mr_pil = Image.fromarray(mr_img)
         material.metallicRoughnessTexture = mr_pil
+
+    if normal_img is not None:
+        material.normalTexture = Image.fromarray(normal_img, "RGB")
 
     mesh.visual = trimesh.visual.TextureVisuals(
         uv=uvs,

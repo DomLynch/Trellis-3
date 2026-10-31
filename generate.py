@@ -30,6 +30,12 @@ from trellis3.runner import Runner, WatchdogError
 from trellis3.thermal import wait_until_cool
 
 
+def _gamma_arg(v):
+    if v.lower() == "auto":
+        return "auto"
+    return float(v)
+
+
 def build_parser():
     p = argparse.ArgumentParser(description="Generate 3D mesh from an image using TRELLIS.2")
     p.add_argument("image", help="Path to input image")
@@ -55,14 +61,21 @@ def build_parser():
     bake = p.add_argument_group("bake (Metal path)")
     bake.add_argument("--metallic-factor", type=float, default=0.0,
                       help="Pin glTF metallicFactor (upstream 1.0; default 0.0 = non-metal). -1 leaves upstream")
-    bake.add_argument("--gamma", type=float, default=None,
-                      help="Apply 1/gamma to base colour, e.g. 2.2 if output looks too dark")
+    bake.add_argument("--gamma", type=_gamma_arg, default=None,
+                      help="Apply 1/gamma to base colour (measured 1.6-1.7 on real heads), "
+                           "or 'auto' to match the input photo's mean colour")
     bake.add_argument("--no-fix-winding", action="store_true",
                       help="Skip the consistent-winding pass before baking")
     bake.add_argument("--uv-cone-deg", type=float, default=None,
                       help="UV chart cone half-angle (upstream 90); larger = fewer charts")
     bake.add_argument("--uv-smooth", type=float, default=None,
                       help="UV chart smoothing strength (upstream 1); larger = fewer charts")
+    bake.add_argument("--normal-map", action="store_true",
+                      help="Bake a tangent-space normal map from the full-res decoder mesh (CPU)")
+    bake.add_argument("--normal-flip-v", action="store_true",
+                      help="Flip V when baking the normal map (if it looks vertically wrong)")
+    bake.add_argument("--no-snap-hires", action="store_true",
+                      help="KDTree path: don't snap texels onto the full-res mesh before sampling")
     p.add_argument("--no-receipt", action="store_true", help="Do not write <output>.receipt.json")
     return p
 
@@ -74,6 +87,9 @@ def bake_kwargs(args):
         "fix_winding": not args.no_fix_winding,
         "uv_cone_deg": args.uv_cone_deg,
         "uv_smooth": args.uv_smooth,
+        "normal_map": args.normal_map,
+        "normal_flip_v": args.normal_flip_v,
+        "snap_hires": not args.no_snap_hires,
     }
 
 
@@ -116,7 +132,8 @@ def main(argv=None):
 
     t1 = time.time()
     outputs = export_mesh(mesh, args.output, texture_size=cfg["texture_size"],
-                          no_texture=cfg["no_texture"], **bake_kwargs(args))
+                          no_texture=cfg["no_texture"], reference_image=args.image,
+                          **bake_kwargs(args))
     t_bake = time.time() - t1
 
     rss = memory.rss_gb()

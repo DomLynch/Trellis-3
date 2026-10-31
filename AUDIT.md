@@ -47,6 +47,42 @@ keyword (names were read from Pedro's `postprocess.py` signature, lines 88–91)
 and whether `fix_normals` on a 200K-face decoder mesh is fast enough (trimesh
 graph traversal; expect seconds, not minutes).
 
+### Batch 3 — CPU nearest-surface ("BVH") and normal map
+
+| Item | How | Result |
+|---|---|---|
+| Exact point-triangle closest point matches `trimesh.proximity.closest_point` (2000 random points, icosphere) | `tests/test_hires.py` | distance to 2e-5, point to 2e-4, barycentric reconstructs |
+| Points on the surface report distance 0 and the right face | same | pass |
+| Flat and smooth normals point outward; smooth is closer to the true sphere normal | same | pass |
+| Nearest-vertex fast mode: error ≤ 0.6 × max edge on a dense sphere, normals within 0.98 of truth | same | pass |
+| Normal map of sphere-on-sphere is flat blue (mean B > 235, R/G ≈ 127); bumped hi-res produces variation (std > 15) | same | pass |
+| to_glb frame conversion inverted correctly | same | pass |
+| Metal-path wiring: normal map baked from the full mesh, attached as `normalTexture`, PNG written | `tests/test_export.py::test_metal_path_normal_map` (fake to_glb that unwraps + converts frame) | pass |
+| Benchmarks (Linux, 327K-face hi-res sphere) | manual | index 0.15 s; normal map 2048², 4.1M texels: **16.6 s** end to end; exact mode is ~100× slower and is opt-in |
+
+81 tests, 3.6 s.
+
+### First Mac measurements (reported by the Mac tester, 31 Oct 2026)
+
+- Peak memory 14.4 GB vs 20.6 GB upstream, same method (−30%). Confirms the
+  checkpoint-selection arithmetic within expectations (predicted 13–15).
+- Metal bake path active; winding pass reported ~half the faces flipped and
+  the fix works — this confirms the upstream `unify_face_orientations` is
+  not effective on this install.
+- Wall time rose from ~6 to ~8 min. Candidates: the winding pass
+  (`fix_normals` on 200K faces — its time is printed in the log), the MPS
+  cache flush forcing re-allocation each stage (`--no-stage-hooks` to A/B),
+  and the thermal guard (`--no-thermal-guard`). Needs the per-stage times
+  from the log to attribute.
+- `--gamma 2.2` too bright (texture mean 0.53/0.45/0.40 vs photo
+  0.40/0.28/0.24); 1.6–1.7 matches. So the Metal path's base colour is not
+  plain linear either. `--gamma auto` now solves it from the photo.
+- `--uv-cone-deg 120 --uv-smooth 2` did not visibly change chart count. The
+  kwargs are accepted by `to_glb`, so either the clusterer ignores them in
+  this path or the fragmentation comes from elsewhere (the pre-simplified
+  mesh's connectivity, or flipped normals before the winding fix landed).
+  Next: log the chart count and A/B cone 180 / smooth 10 vs default.
+
 ## Not verified — needs one run on a Mac
 
 1. **End-to-end generation on MPS.** Nothing here ran the real pipeline. The
@@ -65,6 +101,13 @@ graph traversal; expect seconds, not minutes).
    24 GB machine is unmeasured.
 5. **4096 textures and `1536_cascade`.** Made selectable, expected to OOM on
    24 GB. Nothing in this fork makes them cheaper.
+6a. **Normal map V convention on the Metal path.** The map is rasterised
+   with the trimesh/glTF row convention (row = 1 − v) over the UVs `to_glb`
+   returns. If it renders vertically mirrored, `--normal-flip-v`.
+6b. **Rasteriser cost.** The normal map reuses upstream's per-face Python
+   rasteriser, run twice (positions + face ids): ~10 s at 200K faces / 2048².
+6c. **Nearest-vertex approximation.** Snap error ≤ half an edge of the
+   decoder mesh (~0.001 at 512). Exact mode exists for validation.
 6. **Hole filling on real decoder output.** Tests use synthetic holes. Real
    meshes may have boundary loops that share vertices (non-manifold
    boundary); those are skipped by design. In a 500-random-hole stress test

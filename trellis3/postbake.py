@@ -60,6 +60,40 @@ def apply_gamma(obj, gamma):
     return n
 
 
+def _mean_rgb(img, use_alpha=True):
+    arr = np.asarray(img.convert("RGBA")).astype(np.float32) / 255.0
+    if use_alpha and (arr[..., 3] < 0.999).any():
+        w = arr[..., 3]
+        sel = w > 0.5
+        if sel.any():
+            return arr[..., :3][sel].mean(axis=0)
+    return arr[..., :3].reshape(-1, 3).mean(axis=0)
+
+
+def auto_gamma(obj, reference, lo=1.0, hi=3.0):
+    """Pick the gamma that makes the baked base colour's mean match `reference`.
+
+    With out = in ** (1/g), matching means gives g = log(mean_tex) / log(mean_ref)
+    (per channel, then averaged). The baked texture uses every texel (to_glb
+    inpaints the atlas from the surface, so the mean is representative); the
+    reference uses its alpha mask when it has one. Returns (gamma, mean_tex,
+    mean_ref) or (None, ..) when it cannot be estimated.
+    """
+    from PIL import Image
+    if isinstance(reference, str):
+        reference = Image.open(reference)
+    ref = _mean_rgb(reference)
+    tex_means = [_mean_rgb(mat.baseColorTexture, use_alpha=False)
+                 for mat in _materials(obj) if getattr(mat, "baseColorTexture", None) is not None]
+    if not tex_means:
+        return None, None, ref
+    tex = np.mean(tex_means, axis=0)
+    eps = 1e-3
+    g = np.log(np.clip(tex, eps, 1 - eps)) / np.log(np.clip(ref, eps, 1 - eps))
+    g = float(np.clip(np.mean(g), lo, hi))
+    return g, tex, ref
+
+
 def fix_winding(vertices, faces):
     """Return (vertices, faces, n_flipped) with consistent, outward winding."""
     import trimesh

@@ -80,18 +80,51 @@ def _fix_winding(sv, sf, enabled, log):
     return sv, sf
 
 
+def _hires_index(verts, faces, log):
+    from trellis3.hires import NearestSurface
+    t0 = time.time()
+    ns = NearestSurface(verts, faces)
+    log(f"  Full-res index: {len(faces):,} faces ({time.time() - t0:.1f}s)")
+    return ns
+
+
+def _bake_normals(obj, uvs, hires, texture_size, v_down, flip_v, in_glb_frame, log):
+    """Bake + attach a normal map onto a textured Trimesh. Returns the PNG array."""
+    from trellis3.hires import attach_normal_map, bake_normal_map, glb_to_decoder_frame
+    V = np.asarray(obj.vertices)
+    if in_glb_frame:
+        V = glb_to_decoder_frame(V)
+    uv = np.asarray(uvs, dtype=np.float32).copy()
+    if flip_v:
+        uv[:, 1] = 1.0 - uv[:, 1]
+    log(f"  Baking normal map from full-res mesh ({texture_size}x{texture_size})...")
+    img, _ = bake_normal_map(V, np.asarray(obj.faces), uv, hires, texture_size,
+                             v_down=v_down, log=log)
+    attach_normal_map(obj, img)
+    return img
+
+
 def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                 bake_faces=200000, metallic_factor=0.0, gamma=None, fix_winding=True,
-                uv_cone_deg=None, uv_smooth=None, log=print):
+                uv_cone_deg=None, uv_smooth=None, normal_map=False, normal_flip_v=False,
+                snap_hires=True, reference_image=None, log=print):
     """Write <output>.glb (+ textures) and <output>.obj. Returns dict of paths.
 
     metallic_factor: pins glTF metallicFactor on the Metal path (upstream 1.0;
         model metallic drifts high on MPS, so default 0.0). None = leave as is.
     gamma: optional 1/gamma curve on base colour for the Metal path, which
-        writes linear values (the KDTree path already applies 2.2).
+        writes linear values (the KDTree path already applies 2.2). "auto"
+        solves the gamma that matches the texture's mean colour to
+        `reference_image` (the input photo); measured 1.6-1.7 on real heads.
     fix_winding: consistent outward winding on the simplified mesh before bake.
     uv_cone_deg / uv_smooth: chart clustering knobs passed to to_glb; larger
         values mean fewer, bigger UV charts (upstream 90 / 1).
+    normal_map: bake a tangent-space normal map from the full-res decoder
+        mesh (CPU nearest-surface) and attach it as normalTexture.
+    normal_flip_v: flip V when rasterising the normal map (Metal-path UV
+        convention is unverified; use this if the map looks vertically off).
+    snap_hires: KDTree path only — snap texel positions onto the full-res
+        mesh before sampling voxel colour.
     """
     verts = mesh_out.vertices.cpu().numpy()
     faces = mesh_out.faces.cpu().numpy()
@@ -135,8 +168,26 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                 )
                 if set_metallic_factor(glb, metallic_factor):
                     log(f"  metallicFactor pinned to {metallic_factor}")
+                if gamma == "auto":
+                    from trellis3.postbake import auto_gamma
+                    if reference_image is None:
+                        log("  gamma auto: no reference image given, skipping")
+                        gamma = None
+                    else:
+                        gamma, mt, mr = auto_gamma(glb, reference_image)
+                        if gamma is not None:
+                            log(f"  gamma auto: texture mean {np.round(mt, 3)} vs photo "
+                                f"{np.round(mr, 3)} -> gamma {gamma:.2f}")
                 if apply_gamma(glb, gamma):
                     log(f"  gamma {gamma} applied to base colour")
+                paths["gamma"] = gamma
+                if normal_map:
+                    hires = _hires_index(verts, faces, log)
+                    nimg = _bake_normals(glb, glb.visual.uv, hires, texture_size,
+                                         v_down=False, flip_v=normal_flip_v,
+                                         in_glb_frame=True, log=log)
+                    PILImage.fromarray(nimg, "RGB").save(f"{output}_normal.png")
+                    paths["normal"] = f"{output}_normal.png"
                 glb.export(glb_path)
                 log(f"  Saved: {glb_path}")
                 paths["glb"] = glb_path
@@ -156,6 +207,7 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
             log("  UV unwrapping with xatlas...")
             new_verts, new_faces, uvs, _ = uv_unwrap(bv, bf)
             log(f"  UV unwrap: {len(verts):,} -> {len(new_verts):,} vertices")
+            hires = _hires_index(verts, faces, log) if (snap_hires or normal_map) else None
             base_color_img, mr_img, _ = bake_texture(
                 new_verts, new_faces, uvs,
                 mesh_out.coords.cpu().float().numpy(),
@@ -163,10 +215,20 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                 mesh_out.origin.cpu().float().numpy(),
                 mesh_out.voxel_size,
                 texture_size=texture_size,
+                snap=hires if snap_hires else None,
             )
             tex_path = f"{output}_basecolor.png"
             PILImage.fromarray(base_color_img).save(tex_path)
-            export_glb_with_texture(new_verts, new_faces, uvs, base_color_img, mr_img, glb_path)
+            normal_img = None
+            if normal_map:
+                from trellis3.hires import bake_normal_map
+                log(f"  Baking normal map from full-res mesh ({texture_size}x{texture_size})...")
+                normal_img, _ = bake_normal_map(new_verts, new_faces, uvs, hires, texture_size,
+                                                v_down=True, log=log)
+                PILImage.fromarray(normal_img, "RGB").save(f"{output}_normal.png")
+                paths["normal"] = f"{output}_normal.png"
+            export_glb_with_texture(new_verts, new_faces, uvs, base_color_img, mr_img, glb_path,
+                                    normal_img=normal_img)
             log(f"  Saved: {glb_path}")
             paths["glb"] = glb_path
             paths["basecolor"] = tex_path
