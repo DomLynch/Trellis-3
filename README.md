@@ -40,6 +40,9 @@ released, how jobs are run, and what happens to the mesh after decoding.
 | 1024 attention memory | one SDPA call over all ~49K tokens, plus a padded copy of Q/K/V even for a single sequence | `--attn-chunk N` splits queries into chunks (exact; bounds the score matrix to H×N×S); uniform batches are zero-copy views |
 | Coordinate lookups | Python dict of tuples + `.item()` loops in mesh extraction and the naive sparse conv (minutes and GBs at 1024) | sorted int64 keys + `searchsorted`: 3.6M voxels / 14M queries in 2.3 s |
 | Memory attribution | — | `--profile-memory`: per-stage peak RSS / MPS driver / MPS allocator, printed and stored in the receipt |
+| CPU texture bake | k-nearest-neighbour inverse-distance average over voxel centres (soft) | **exact trilinear sampling of the voxel volume — the official bake's maths** (`backends/voxel_sample.py`), chunked for 8K; `--bake-sampling knn` keeps the old path |
+| CPU bake colour | gamma 2.2 hard-coded, metallic from upstream | same `--gamma auto` / `--metallic-factor` handling as the Metal path |
+| Token budget | 49152, resolution silently dropped above it | 98304 by default on machines with ≥48 GB (`--max-tokens` overrides); small machines keep 49152 |
 | Colour match | `--gamma 2.2` overshoots (measured: 2.2 gives 0.53/0.45/0.40 vs photo 0.40/0.28/0.24) | `--gamma auto` solves the gamma that matches the texture's mean to the input photo; `--gamma 1.7` if you want it fixed |
 
 Weight sizes are the bf16/fp16 checkpoints on Hugging Face. The 1024 cascade
@@ -156,6 +159,15 @@ python generate.py head.png --preset master --output boss1 --single-process --pr
 python generate.py head.png --preset hero   --output boss1_hero --min-free-gb 6 --profile-memory
 ```
 
+"Everything at maximum" on 64 GB (faces, props, environments alike):
+
+```bash
+python generate.py input.png --preset hero --steps 16 --output name --single-process --profile-memory
+```
+1536 shape (the model's ceiling), 98K token budget, 8K textures, 2M-face bake,
+normal map, trilinear bake. Phone/web cuts come from the same latents with
+`--from-latents name.latents.pt --texture-size 1024 --bake-faces 30000`.
+
 ## Desktop master → phone
 
 ```bash
@@ -179,7 +191,8 @@ The latents file (tens of MB) can also be decoded on another machine.
 --pipeline-type           512 | 1024 | 1024_cascade | 1536_cascade
 --texture-size            512 | 1024 | 2048 | 4096
 --steps N                 sampler steps for all three flow phases
---max-tokens N            cascade token budget (default 49152); lower = less memory, lower resolution
+--max-tokens N            cascade token budget (default 98304 on ≥48 GB machines, else 49152)
+--bake-sampling trilinear|knn   CPU bake sampling (default trilinear = official maths)
 --resident                keep models on MPS instead of CPU shuttling (opt-in, unmeasured)
 --no-stage-hooks          don't flush the MPS cache between stages
 --no-thermal-guard        don't wait for the CPU to cool

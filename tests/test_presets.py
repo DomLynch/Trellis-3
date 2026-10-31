@@ -55,3 +55,13 @@ def test_hero_preset_and_single_process():
     assert h["two_stage"] is True and h["normal_map"] is True
     assert apply_preset("hero", single_process=True)["two_stage"] is False
     assert apply_preset("master", single_process=True)["two_stage"] is False
+
+
+def test_token_budget_defaults_by_machine_size(monkeypatch):
+    from trellis3 import presets
+    assert presets.default_max_tokens(total_gb=24) == 49152
+    assert presets.default_max_tokens(total_gb=64) == 98304
+    monkeypatch.setattr(presets, "default_max_tokens", lambda total_gb=None: 98304)
+    assert apply_preset("hero")["max_num_tokens"] == 98304
+    assert apply_preset("draft")["max_num_tokens"] == 98304          # machine-wide, not per preset
+    assert apply_preset("hero", max_num_tokens=30000)["max_num_tokens"] == 30000

@@ -107,7 +107,7 @@ def _bake_normals(obj, uvs, hires, texture_size, v_down, flip_v, in_glb_frame, l
 def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                 bake_faces=200000, metallic_factor=0.0, gamma=None, fix_winding=True,
                 uv_cone_deg=None, uv_smooth=None, normal_map=False, normal_flip_v=False,
-                snap_hires=True, reference_image=None, log=print):
+                snap_hires=True, reference_image=None, bake_sampling="trilinear", log=print):
     """Write <output>.glb (+ textures) and <output>.obj. Returns dict of paths.
 
     metallic_factor: pins glTF metallicFactor on the Metal path (upstream 1.0;
@@ -123,8 +123,10 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
         mesh (CPU nearest-surface) and attach it as normalTexture.
     normal_flip_v: flip V when rasterising the normal map (Metal-path UV
         convention is unverified; use this if the map looks vertically off).
-    snap_hires: KDTree path only — snap texel positions onto the full-res
+    snap_hires: CPU path only — snap texel positions onto the full-res
         mesh before sampling voxel colour.
+    bake_sampling: CPU path only — "trilinear" (the official bake's maths,
+        default) or "knn" (upstream trellis-mac's inverse-distance average).
     """
     verts = mesh_out.vertices.cpu().numpy()
     faces = mesh_out.faces.cpu().numpy()
@@ -198,8 +200,9 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                 use_metal = False
 
         if not use_metal:
-            log(f"\nBaking PBR textures via KDTree ({texture_size}x{texture_size})...")
-            from backends.texture_baker import uv_unwrap, bake_texture, export_glb_with_texture
+            log(f"\nBaking PBR textures on CPU ({texture_size}x{texture_size}, {bake_sampling})...")
+            from backends.texture_baker import uv_unwrap, bake_texture, build_textured_mesh
+            from trellis3.postbake import apply_gamma, auto_gamma, set_metallic_factor
 
             target_faces = min(bake_faces, len(faces))
             bv, bf = _simplify(verts, faces, target_faces, log)
@@ -216,9 +219,10 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                 mesh_out.voxel_size,
                 texture_size=texture_size,
                 snap=hires if snap_hires else None,
+                sampling=bake_sampling,
+                gamma=None,                       # applied below, same as the Metal path
             )
             tex_path = f"{output}_basecolor.png"
-            PILImage.fromarray(base_color_img).save(tex_path)
             normal_img = None
             if normal_map:
                 from trellis3.hires import bake_normal_map
@@ -227,12 +231,27 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                                                 v_down=True, log=log)
                 PILImage.fromarray(normal_img, "RGB").save(f"{output}_normal.png")
                 paths["normal"] = f"{output}_normal.png"
-            export_glb_with_texture(new_verts, new_faces, uvs, base_color_img, mr_img, glb_path,
-                                    normal_img=normal_img)
+            glb = build_textured_mesh(new_verts, new_faces, uvs, base_color_img, mr_img, normal_img)
+            if set_metallic_factor(glb, metallic_factor):
+                log(f"  metallicFactor pinned to {metallic_factor}")
+            g = gamma
+            if g == "auto":
+                g = None
+                if reference_image is not None:
+                    g, mt, mr = auto_gamma(glb, reference_image)
+                    if g is not None:
+                        log(f"  gamma auto: texture mean {np.round(mt, 3)} vs photo {np.round(mr, 3)} -> gamma {g:.2f}")
+            if g is None and gamma != "auto":
+                g = 2.2                            # upstream default when nothing else is asked
+            if apply_gamma(glb, g):
+                log(f"  gamma {g} applied to base colour")
+            paths["gamma"] = g
+            glb.visual.material.baseColorTexture.convert("RGB").save(tex_path)
+            glb.export(glb_path)
             log(f"  Saved: {glb_path}")
             paths["glb"] = glb_path
             paths["basecolor"] = tex_path
-            paths["bake"] = "kdtree"
+            paths["bake"] = f"cpu-{bake_sampling}"
         log(f"  Bake time: {time.time() - t_bake:.0f}s")
     else:
         log("\nExporting with vertex colors (use --texture-size for PBR textures)...")

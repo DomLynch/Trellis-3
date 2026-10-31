@@ -55,7 +55,10 @@ def parse_job(spec, image, out_dir):
                        pipeline_type=spec.get("pipeline_type"),
                        steps=spec.get("steps"),
                        texture_size=spec.get("texture_size"),
-                       no_texture=bool(spec.get("no_texture", False)))
+                       no_texture=bool(spec.get("no_texture", False)),
+                       bake_faces=spec.get("bake_faces"),
+                       normal_map=bool(spec.get("normal_map", False)),
+                       max_num_tokens=int(spec["max_tokens"]) if spec.get("max_tokens") else None)
     seeds = spec.get("seeds") or [spec.get("seed", 42)]
     seeds = [int(s) for s in seeds]
     stem = os.path.splitext(os.path.basename(image))[0]
@@ -64,7 +67,6 @@ def parse_job(spec, image, out_dir):
         "image": image,
         "seeds": seeds,
         "out_dir": os.path.join(out_dir, stem),
-        "max_num_tokens": int(spec.get("max_tokens", 49152)),
         "bake": {
             "metallic_factor": None if mf is None or float(mf) < 0 else float(mf),
             "gamma": spec.get("gamma"),
@@ -74,6 +76,8 @@ def parse_job(spec, image, out_dir):
             "normal_map": bool(spec.get("normal_map", False)),
             "normal_flip_v": bool(spec.get("normal_flip_v", False)),
             "snap_hires": bool(spec.get("snap_hires", True)),
+            "bake_faces": cfg["bake_faces"],
+            "bake_sampling": spec.get("bake_sampling", "trilinear"),
         },
         **cfg,
     }

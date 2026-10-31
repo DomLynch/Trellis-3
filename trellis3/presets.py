@@ -19,15 +19,34 @@ PRESETS = {
 }
 
 _BASE = {"pipeline_type": "512", "steps": None, "texture_size": 1024, "no_texture": False,
-         "bake_faces": 200_000, "normal_map": False, "two_stage": False}
+         "bake_faces": 200_000, "normal_map": False, "two_stage": False, "max_num_tokens": None}
+
+# Cascade token budget. Upstream caps at 49152 and silently drops the
+# resolution when a shape needs more. With 48 GB+ of memory there is no
+# reason to lose resolution, so the default doubles; small machines keep the
+# upstream cap because tokens are what the attention memory scales with.
+TOKENS_SMALL = 49152
+TOKENS_LARGE = 98304
+LARGE_MACHINE_GB = 48
+
+
+def default_max_tokens(total_gb=None):
+    if total_gb is None:
+        try:
+            from trellis3.memory import total_memory_gb
+            total_gb = total_memory_gb()
+        except Exception:
+            total_gb = None
+    return TOKENS_LARGE if (total_gb or 0) >= LARGE_MACHINE_GB else TOKENS_SMALL
 
 # Values a user could have typed explicitly; anything else means "use preset".
 _DEFAULTS = {"pipeline_type": None, "steps": None, "texture_size": None, "no_texture": False,
-             "bake_faces": None, "normal_map": False, "two_stage": False}
+             "bake_faces": None, "normal_map": False, "two_stage": False, "max_num_tokens": None}
 
 
 def apply_preset(name, pipeline_type=None, steps=None, texture_size=None, no_texture=False,
-                 bake_faces=None, normal_map=False, two_stage=False, single_process=False):
+                 bake_faces=None, normal_map=False, two_stage=False, single_process=False,
+                 max_num_tokens=None):
     """Merge preset values with explicit overrides. Returns a settings dict.
 
     With no preset the upstream defaults are used (512, 12 steps, 1024 tex,
@@ -42,10 +61,12 @@ def apply_preset(name, pipeline_type=None, steps=None, texture_size=None, no_tex
 
     explicit = {"pipeline_type": pipeline_type, "steps": steps, "texture_size": texture_size,
                 "no_texture": no_texture, "bake_faces": bake_faces, "normal_map": normal_map,
-                "two_stage": two_stage}
+                "two_stage": two_stage, "max_num_tokens": max_num_tokens}
     for k, v in explicit.items():
         if v != _DEFAULTS[k]:
             base[k] = v
     if single_process:
         base["two_stage"] = False
+    if base["max_num_tokens"] is None:
+        base["max_num_tokens"] = default_max_tokens()
     return base

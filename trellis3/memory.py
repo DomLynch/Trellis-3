@@ -255,6 +255,26 @@ def free_memory_gb():
         return None
 
 
+def total_memory_gb():
+    """Physical memory in GB, or None."""
+    try:
+        import psutil
+        return psutil.virtual_memory().total / 1e9
+    except Exception:
+        pass
+    try:
+        import os
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9
+    except Exception:
+        pass
+    try:
+        import subprocess
+        out = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5).stdout
+        return int(out.strip()) / 1e9
+    except Exception:
+        return None
+
+
 def rss_gb():
     """Resident set size of this process in GB, or None if unavailable."""
     try:

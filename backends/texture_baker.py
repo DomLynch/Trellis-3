@@ -113,7 +113,8 @@ def _rasterize_uv_triangles(vertices, faces, uvs, texture_size):
 
 
 def bake_texture(vertices, faces, uvs, voxel_coords, voxel_attrs, origin, voxel_size,
-                 texture_size=2048, k_neighbors=8, snap=None, **kwargs):
+                 texture_size=2048, k_neighbors=8, snap=None, sampling="trilinear", gamma=2.2,
+                 **kwargs):
     """
     Bake voxel attributes into a UV-mapped texture.
 
@@ -143,11 +144,12 @@ def bake_texture(vertices, faces, uvs, voxel_coords, voxel_attrs, origin, voxel_
     # Voxel world-space positions (voxel centers)
     voxel_world = coords_np.astype(np.float32) * voxel_size + origin_np + voxel_size * 0.5
 
-    # Build KDTree on voxel positions
-    print(f"  Building KDTree...")
-    t_tree = time.time()
-    tree = cKDTree(voxel_world)
-    print(f"    Tree built in {time.time() - t_tree:.1f}s")
+    tree = None
+    if sampling != "trilinear":
+        print(f"  Building KDTree...")
+        t_tree = time.time()
+        tree = cKDTree(voxel_world)
+        print(f"    Tree built in {time.time() - t_tree:.1f}s")
 
     # Rasterize UV triangles to 3D positions
     print(f"  Rasterizing {len(faces):,} triangles into {texture_size}x{texture_size}...")
@@ -164,37 +166,28 @@ def bake_texture(vertices, faces, uvs, voxel_coords, voxel_attrs, origin, voxel_
         positions[mask] = snap.query(positions[mask])[0]
         print(f"    Snapped to full-res mesh in {time.time() - t_snap:.1f}s")
 
-    # For each valid texel, find k nearest voxels
     query_points = positions[mask]  # [M, 3]
     M = len(query_points)
-    print(f"  Querying {M:,} texels, k={k_neighbors}...")
     t_q = time.time()
-    distances, indices = tree.query(query_points, k=k_neighbors, workers=-1)
-    # distances: [M, k], indices: [M, k]
-    print(f"    Query done in {time.time() - t_q:.1f}s")
-
-    # Inverse-distance weighted average. Use distance threshold to skip far voxels.
-    # voxel_size is world units per voxel; 2x voxel_size = reasonable neighborhood
-    max_dist = voxel_size * 2.0
-    print(f"  Weighting colors (max_dist = {max_dist:.4f})...")
-
-    # Weights: 1 / (d + eps), but zero weight for distances > max_dist
-    eps = voxel_size * 0.1
-    weights = 1.0 / (distances + eps)
-    weights[distances > max_dist] = 0.0
-    weights_sum = weights.sum(axis=1, keepdims=True)
-
-    # Find texels with at least one nearby voxel
-    has_neighbor = (weights_sum > 0).squeeze()
-
-    # Normalize weights
-    weights = np.where(weights_sum > 0, weights / np.maximum(weights_sum, 1e-10), 0.0)
-
-    # Gather colors: attrs_np[indices] → [M, k, C]
-    neighbor_attrs = attrs_np[indices]  # [M, k, C]
-
-    # Weighted sum over k dimension
-    sampled = (neighbor_attrs * weights[..., None]).sum(axis=1)  # [M, C]
+    if sampling == "trilinear":
+        # Trellis-3: the official bake's maths — trilinear sample of the voxel
+        # volume at index (pos - origin) / voxel_size — on the sparse grid.
+        from .voxel_sample import sparse_trilinear
+        print(f"  Trilinear sampling {M:,} texels...")
+        sampled, has_neighbor = sparse_trilinear(coords_np, attrs_np, origin_np, voxel_size, query_points)
+    else:
+        # upstream trellis-mac fallback: k-NN inverse-distance average
+        print(f"  Querying {M:,} texels, k={k_neighbors}...")
+        distances, indices = tree.query(query_points, k=k_neighbors, workers=-1)
+        max_dist = voxel_size * 2.0
+        eps = voxel_size * 0.1
+        weights = 1.0 / (distances + eps)
+        weights[distances > max_dist] = 0.0
+        weights_sum = weights.sum(axis=1, keepdims=True)
+        has_neighbor = (weights_sum > 0).squeeze()
+        weights = np.where(weights_sum > 0, weights / np.maximum(weights_sum, 1e-10), 0.0)
+        sampled = (attrs_np[indices] * weights[..., None]).sum(axis=1)
+    print(f"    Sampled in {time.time() - t_q:.1f}s, {has_neighbor.mean() * 100:.1f}% of texels covered")
 
     # Write texture
     base_color = np.zeros((H, W, 3), dtype=np.float32)
@@ -226,8 +219,12 @@ def bake_texture(vertices, faces, uvs, voxel_coords, voxel_attrs, origin, voxel_
             channel[unfilled] = blurred[unfilled]
         current_mask = dilated
 
-    # Gamma correction: linear -> sRGB
-    base_color = np.power(np.clip(base_color, 0, 1), 1.0 / 2.2)
+    # Gamma: upstream hard-coded 1/2.2 here; None keeps linear so the caller
+    # can match the photo (gamma auto) the same way as the Metal path.
+    if gamma:
+        base_color = np.power(np.clip(base_color, 0, 1), 1.0 / gamma)
+    else:
+        base_color = np.clip(base_color, 0, 1)
 
     base_color_img = (base_color * 255).astype(np.uint8)
 
@@ -242,9 +239,8 @@ def bake_texture(vertices, faces, uvs, voxel_coords, voxel_attrs, origin, voxel_
     return base_color_img, mr_img, current_mask
 
 
-def export_glb_with_texture(vertices, faces, uvs, base_color_img, mr_img=None, output_path="output.glb",
-                            normal_img=None):
-    """Export mesh with UV-mapped PBR textures as GLB."""
+def build_textured_mesh(vertices, faces, uvs, base_color_img, mr_img=None, normal_img=None):
+    """trimesh with UV-mapped PBR textures (not yet written to disk)."""
     import trimesh
     from PIL import Image
 
@@ -269,6 +265,11 @@ def export_glb_with_texture(vertices, faces, uvs, base_color_img, mr_img=None, o
         uv=uvs,
         material=material,
     )
+    return mesh
 
-    mesh.export(output_path)
+
+def export_glb_with_texture(vertices, faces, uvs, base_color_img, mr_img=None, output_path="output.glb",
+                            normal_img=None):
+    """Export mesh with UV-mapped PBR textures as GLB."""
+    build_textured_mesh(vertices, faces, uvs, base_color_img, mr_img, normal_img).export(output_path)
     return output_path

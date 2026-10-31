@@ -202,6 +202,27 @@ covers it), and `conv_none` speed. The two things that cannot be fixed from
 here without a device: the sparse-conv speed (needs a ROCm `flex_gemm`) and
 whatever the Windows ROCm wheel does differently from Linux.
 
+### Batch 10 — trilinear CPU bake, machine-wide token budget
+
+| Item | How | Result |
+|---|---|---|
+| `sparse_trilinear` equals `torch.grid_sample(mode='bilinear', align_corners=True)` on a dense 9³ volume at 500 random interior points | `tests/test_voxel_sample.py` | pass (1e-5) |
+| Missing corners: renormalised by default, official zero-contribution with `renormalize=False`; points outside the grid report uncovered | same | pass |
+| Chunking transparent | same | pass |
+| `bake_texture(sampling="trilinear")` end to end on a quad over a uniform voxel cube: exact colour, roughness/metallic channels, gamma optional | same | pass |
+| Full CPU bake path through `export_mesh`: xatlas unwrap → trilinear → metallic pinned → gamma auto from the photo → PNG + GLB | `tests/test_export.py::test_cpu_bake_path_trilinear_with_gamma_auto` | pass |
+| Token budget: 98304 on ≥48 GB, 49152 below, explicit value wins, not tied to a preset | `tests/test_presets.py` | pass |
+| Server routes `bake_faces`, `normal_map`, `max_tokens`, `bake_sampling` per job | `tests/test_serve.py` | pass |
+
+132 tests.
+
+Quality note: with trilinear sampling, snap-to-full-res, configurable bake
+size, normal map and the gamma/metallic handling, the CPU bake now does the
+same maths as the official `to_glb` at every step except UV unwrapping
+(xatlas vs. Microsoft's own chart clustering). Not verified against a real
+decoder output — the oracle here is `grid_sample`, which *is* the official
+sampler, so the remaining risk is integration, not maths.
+
 ### First Mac measurements (reported by the Mac tester, 31 Oct 2026)
 
 - Peak memory 14.4 GB vs 20.6 GB upstream, same method (−30%). Confirms the

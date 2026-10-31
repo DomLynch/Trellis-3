@@ -125,3 +125,27 @@ def test_metal_path_normal_map(tmp_path, monkeypatch):
     assert tex is not None and tex.size == (64, 64)
     px = np.asarray(tex).reshape(-1, 3).astype(float)
     assert px[:, 2].mean() > 200   # same sphere hi/lo -> mostly flat
+
+
+def test_cpu_bake_path_trilinear_with_gamma_auto(tmp_path, monkeypatch):
+    """Metal unavailable -> CPU bake: trilinear sampling, metallic pinned, gamma auto from the photo."""
+    import trellis3.export as ex
+    pytest.importorskip("xatlas")
+    monkeypatch.setattr(ex, "_metal_bake_available", lambda: False)
+    box = trimesh.creation.box(extents=(0.5, 0.5, 0.5))
+    g = np.arange(-5, 6)
+    coords = np.stack(np.meshgrid(g, g, g, indexing="ij"), -1).reshape(-1, 3)
+    attrs = np.tile(np.array([0.25, 0.25, 0.25, 0.9, 0.3, 1.0], np.float32), (len(coords), 1))
+    m = _Mesh(np.asarray(box.vertices), np.asarray(box.faces))
+    m.attrs = torch.tensor(attrs); m.coords = torch.tensor(coords, dtype=torch.int32)
+    m.origin = torch.zeros(3); m.voxel_size = 0.1; m.layout = {}
+    ref = tmp_path / "ref.png"
+    Image.new("RGB", (4, 4), (128, 128, 128)).save(ref)
+    out = export_mesh(m, str(tmp_path / "c"), texture_size=64, gamma="auto", reference_image=str(ref),
+                      fix_winding=False, snap_hires=False, log=lambda *_: None)
+    assert out["bake"] == "cpu-trilinear" and (tmp_path / "c.glb").exists()
+    assert 1.5 < out["gamma"] < 2.5                                   # 0.25 -> 0.5 needs ~2
+    tex = np.asarray(Image.open(tmp_path / "c_basecolor.png")).astype(float) / 255
+    assert abs(np.median(tex[tex > 0.05]) - 0.5) < 0.08
+    glb = trimesh.load(str(tmp_path / "c.glb"), force="mesh")
+    assert glb.visual.material.metallicFactor == 0.0

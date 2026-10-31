@@ -64,8 +64,11 @@ def build_parser():
     p.add_argument("--ss-steps", type=int, default=None, help="Steps for the sparse-structure stage")
     p.add_argument("--shape-steps", type=int, default=None, help="Steps for the shape stage")
     p.add_argument("--tex-steps", type=int, default=None, help="Steps for the texture stage (the slow one at 1024)")
-    p.add_argument("--max-tokens", type=int, default=49152,
-                   help="Max cascade tokens; lower it to cut 1024/1536 memory (default: 49152)")
+    p.add_argument("--max-tokens", type=int, default=None,
+                   help="Max cascade tokens (default 49152; hero preset 98304). Lower cuts 1024/1536 memory, "
+                        "higher avoids the automatic resolution drop on 64 GB machines")
+    p.add_argument("--bake-sampling", choices=["trilinear", "knn"], default="trilinear",
+                   help="CPU bake: trilinear = official bake maths (default); knn = upstream average")
 
     run = p.add_argument_group("run control")
     run.add_argument("--two-stage", action="store_true",
@@ -137,6 +140,7 @@ def bake_kwargs(args, cfg):
         "normal_flip_v": args.normal_flip_v,
         "snap_hires": not args.no_snap_hires,
         "bake_faces": cfg["bake_faces"],
+        "bake_sampling": args.bake_sampling,
     }
 
 
@@ -167,7 +171,7 @@ def _export_and_finish(args, cfg, mesh, t0, t_gen, profiler, extra_settings):
         print("\nMemory profile (peak per stage):\n" + profiler.table())
         extra["memory_profile"] = prof
     if not args.no_receipt:
-        settings = {**cfg, "seed": args.seed, "max_num_tokens": args.max_tokens,
+        settings = {**cfg, "seed": args.seed,
                     "resident": args.resident, "attn_chunk": args.attn_chunk, "attn_tile": args.attn_tile,
                     "steps_per_stage": steps_spec(args, cfg), **bake_kwargs(args, cfg), **extra_settings}
         rp = write_receipt(args.output, settings, args.image, outputs,
@@ -189,7 +193,7 @@ def main(argv=None):
     cfg = apply_preset(args.preset, pipeline_type=args.pipeline_type, steps=args.steps,
                        texture_size=args.texture_size, no_texture=args.no_texture,
                        bake_faces=args.bake_faces, normal_map=args.normal_map, two_stage=args.two_stage,
-                       single_process=args.single_process)
+                       single_process=args.single_process, max_num_tokens=args.max_tokens)
     latents_path = args.latents or f"{args.output}.latents.pt"
 
     print("=" * 60)
@@ -197,7 +201,7 @@ def main(argv=None):
     print("=" * 60)
     print(f"preset={args.preset or '-'} pipeline={cfg['pipeline_type']} steps={steps_spec(args, cfg) or 'default'} "
           f"texture={'none' if cfg['no_texture'] else cfg['texture_size']} bake_faces={cfg['bake_faces']} "
-          f"normal_map={cfg['normal_map']} max_tokens={args.max_tokens}")
+          f"normal_map={cfg['normal_map']} max_tokens={cfg['max_num_tokens']}")
 
     if args.attn_auto_gb is not None:
         os.environ["ATTN_AUTO_GB"] = str(args.attn_auto_gb)
@@ -259,11 +263,11 @@ def main(argv=None):
     try:
         if args.legacy_run:
             mesh = runner.generate(img, seed=args.seed, pipeline_type=cfg["pipeline_type"],
-                                   steps=cfg["steps"], max_num_tokens=args.max_tokens)
+                                   steps=cfg["steps"], max_num_tokens=cfg["max_num_tokens"])
             t_gen = time.time() - t0
         else:
             state = runner.sample(img, pipeline_type=cfg["pipeline_type"], seed=args.seed,
-                                  steps=steps_spec(args, cfg), max_num_tokens=args.max_tokens,
+                                  steps=steps_spec(args, cfg), max_num_tokens=cfg["max_num_tokens"],
                                   state=state, on_stage=on_stage, release=not args.keep_models,
                                   min_free_gb=args.min_free_gb)
             t_sample = time.time() - t0

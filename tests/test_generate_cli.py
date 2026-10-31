@@ -83,6 +83,7 @@ def test_default_staged_run_saves_latents_and_receipt(img, tmp_path, fake):
     generate.main([img, "--preset", "draft", "--seed", "7", "--output", out, "--max-tokens", "30000",
                    "--tex-steps", "4"])
     assert fake["pipeline_type"] == "512" and fake["seed"] == 7 and fake["tokens"] == 30000
+    assert fake["bake_sampling"] == "trilinear"
     assert fake["steps"] == {"ss": 8, "shape": 8, "tex": 4} and fake["release"] is True
     assert fake["decoded"] == ["coords", "shape", "tex"]
     assert os.path.exists(out + ".latents.pt")
