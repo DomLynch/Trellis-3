@@ -13,6 +13,9 @@ PRESETS = {
     # Desktop master: everything the phone version is later cut down from.
     "master": {"pipeline_type": "1024_cascade", "steps": None, "texture_size": 4096, "no_texture": False,
                "bake_faces": 1_000_000, "normal_map": True, "two_stage": True},
+    # Hero faces on a 64 GB machine: 1536 shape, 8K textures, 2M-face bake.
+    "hero": {"pipeline_type": "1536_cascade", "steps": None, "texture_size": 8192, "no_texture": False,
+             "bake_faces": 2_000_000, "normal_map": True, "two_stage": True},
 }
 
 _BASE = {"pipeline_type": "512", "steps": None, "texture_size": 1024, "no_texture": False,
@@ -24,7 +27,7 @@ _DEFAULTS = {"pipeline_type": None, "steps": None, "texture_size": None, "no_tex
 
 
 def apply_preset(name, pipeline_type=None, steps=None, texture_size=None, no_texture=False,
-                 bake_faces=None, normal_map=False, two_stage=False):
+                 bake_faces=None, normal_map=False, two_stage=False, single_process=False):
     """Merge preset values with explicit overrides. Returns a settings dict.
 
     With no preset the upstream defaults are used (512, 12 steps, 1024 tex,
@@ -43,4 +46,6 @@ def apply_preset(name, pipeline_type=None, steps=None, texture_size=None, no_tex
     for k, v in explicit.items():
         if v != _DEFAULTS[k]:
             base[k] = v
+    if single_process:
+        base["two_stage"] = False
     return base

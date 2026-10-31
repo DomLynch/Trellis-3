@@ -104,6 +104,23 @@ loads lazily on first use and stays loaded. Bake keys (`metallic_factor`,
 free RAM before starting a job instead of swapping. Every output gets a
 `.receipt.json`.
 
+## On a 64 GB Mac
+
+Everything here was built on a 24 GB Air; on 64 GB the memory tricks become
+optional and the ceiling moves up:
+
+- 1024 masters run **without** tiling (the 15 GB attention matrix just fits);
+  the dispatcher tiles automatically only when the score matrix would exceed
+  `ATTN_AUTO_GB` (default 6 GB) — so 1536 tiles itself, 1024 runs fused.
+- `--single-process` skips the child-process decode (no second model load).
+- `--preset hero`: 1536 shape, 8K textures, 2M-face bake, normal map.
+- `--resident` (models stay on the GPU, no CPU shuttling) is safe to try.
+
+```bash
+python generate.py head.png --preset master --output boss1 --single-process --profile-memory
+python generate.py head.png --preset hero   --output boss1_hero --min-free-gb 6 --profile-memory
+```
+
 ## Desktop master → phone
 
 ```bash
@@ -131,7 +148,9 @@ The latents file (tens of MB) can also be decoded on another machine.
 --resident                keep models on MPS instead of CPU shuttling (opt-in, unmeasured)
 --no-stage-hooks          don't flush the MPS cache between stages
 --no-thermal-guard        don't wait for the CPU to cool
---attn-tile LQ,SK         exact tiled attention, memory bounded (use 2048,4096 for 1024 on 24 GB)
+--attn-tile LQ,SK         force exact tiled attention with these tiles
+--attn-auto-gb G          tile automatically when the score matrix would exceed G GB (default 6; 0 = never)
+--single-process          decode here even if the preset is two-stage
 --attn-chunk N            query-chunked full attention; exact. CAUTION: can force MPS off its fused kernel and use
                           MORE memory — only if the unchunked run OOMs inside a sampling pass
 --profile-memory          per-stage memory table (RSS, MPS driver, MPS allocator) + receipt entry

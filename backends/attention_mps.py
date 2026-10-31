@@ -118,14 +118,45 @@ def sdpa_tiled(q, k, v, q_tile=2048, k_tile=4096, scale=None):
     return out
 
 
+def auto_budget_gb():
+    """ATTN_AUTO_GB: tile automatically when the fp32 score matrix would exceed
+    this many GB (default 6). 0 disables."""
+    try:
+        return float(os.environ.get("ATTN_AUTO_GB", "6"))
+    except ValueError:
+        return 6.0
+
+
+def auto_tiles(q, k, budget_gb=None):
+    """Tile sizes that keep one [B,H,Lq,Sk] fp32 tile under ~budget/4, or None
+    when the full score matrix already fits the budget."""
+    budget_gb = auto_budget_gb() if budget_gb is None else budget_gb
+    if budget_gb <= 0:
+        return None
+    B, H, L, _ = q.shape
+    S = k.shape[2]
+    full = B * H * L * S * 4
+    if full <= budget_gb * 1e9:
+        return None
+    q_tile = min(L, 2048)
+    k_tile = int((budget_gb * 1e9 / 4) // (B * H * q_tile * 4))
+    k_tile = max(512, min(S, k_tile))
+    return q_tile, k_tile
+
+
 def sdpa_chunked(sdpa_fn, q, k, v, chunk=None, tiles=None):
     """Attention dispatcher. q/k/v: [B, H, L|S, C].
 
-    ATTN_TILE=Lq,Sk  -> sdpa_tiled (bounded memory, exact, slower)
+    ATTN_TILE=Lq,Sk  -> sdpa_tiled with those tiles (bounded memory, exact)
+    ATTN_AUTO_GB=G   -> sdpa_tiled only when the score matrix would exceed G GB
+                        (default 6: a 24 GB Mac tiles at 1024, a 64 GB Mac
+                        runs 1024 fused and tiles at 1536)
     ATTN_CHUNK=N     -> sdpa_fn over query chunks (bounds one axis only)
     otherwise        -> sdpa_fn as is
     """
     tiles = tile_sizes() if tiles is None else tiles
+    if not tiles:
+        tiles = auto_tiles(q, k)
     if tiles:
         return sdpa_tiled(q, k, v, *tiles)
     chunk = chunk_size() if chunk is None else chunk

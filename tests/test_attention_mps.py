@@ -109,3 +109,23 @@ def test_dispatcher_prefers_tiles_over_chunk(monkeypatch):
     assert am.tile_sizes() is None
     monkeypatch.setenv("ATTN_TILE", "2048x4096")
     assert am.tile_sizes() == (2048, 4096)
+
+
+def test_auto_tiles_only_when_over_budget(monkeypatch):
+    q = torch.zeros(1, 12, 17730, 128); k = torch.zeros(1, 12, 17730, 128)
+    # 12 x 17730^2 x 4 B = 15 GB: tiles at the 6 GB default, not at 24 GB
+    assert am.auto_tiles(q, k, budget_gb=6) is not None
+    assert am.auto_tiles(q, k, budget_gb=24) is None
+    qt, kt = am.auto_tiles(q, k, budget_gb=6)
+    assert qt == 2048 and 512 <= kt <= 17730 and 12 * qt * kt * 4 <= 6e9 / 4 + 12 * qt * 4
+    small = torch.zeros(1, 12, 2000, 128)
+    assert am.auto_tiles(small, small, budget_gb=6) is None            # 0.2 GB, fused path
+    assert am.auto_tiles(q, k, budget_gb=0) is None                     # disabled
+    monkeypatch.setenv("ATTN_AUTO_GB", "0.0001")
+    g = torch.Generator().manual_seed(7)
+    q2 = torch.randn(1, 2, 300, 8, generator=g); k2 = torch.randn(1, 2, 300, 8, generator=g); v2 = torch.randn(1, 2, 300, 8, generator=g)
+    calls = []
+    def spy(a, b, c):
+        calls.append(1); return F.scaled_dot_product_attention(a, b, c)
+    out = am.sdpa_chunked(spy, q2, k2, v2)
+    assert calls == [] and torch.allclose(out, F.scaled_dot_product_attention(q2, k2, v2), atol=1e-5)

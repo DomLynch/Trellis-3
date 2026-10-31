@@ -51,7 +51,8 @@ def build_parser():
     p.add_argument("--output", default="output_3d", help="Output filename without extension")
     p.add_argument("--preset", choices=sorted(PRESETS), default=None,
                    help="draft: 512/8 steps/no texture. final: 1024_cascade/2048. "
-                        "master: 1024_cascade/4096/1M-face bake/normal map/two-stage")
+                        "master: 1024_cascade/4096/1M faces/normal map/two-stage. "
+                        "hero: 1536_cascade/8192/2M faces (64 GB machines)")
     p.add_argument("--pipeline-type", default=None, choices=list(memory.PIPELINE_TYPES),
                    help="Pipeline resolution (default: 512, or the preset's)")
     p.add_argument("--texture-size", type=int, default=None, choices=[512, 1024, 2048, 4096, 8192],
@@ -69,6 +70,10 @@ def build_parser():
     run = p.add_argument_group("run control")
     run.add_argument("--two-stage", action="store_true",
                      help="Sample in this process, then decode+export in a fresh child process")
+    run.add_argument("--single-process", action="store_true",
+                     help="Decode in this process even if the preset asks for two-stage (fine on 64 GB)")
+    run.add_argument("--attn-auto-gb", type=float, default=None,
+                     help="Tile attention automatically when the score matrix would exceed this many GB (default 6; 0 = never)")
     run.add_argument("--from-latents", metavar="PATH", default=None,
                      help="Skip sampling: decode and export the saved latents (loads decoders only)")
     run.add_argument("--resume", action="store_true",
@@ -181,7 +186,8 @@ def main(argv=None):
 
     cfg = apply_preset(args.preset, pipeline_type=args.pipeline_type, steps=args.steps,
                        texture_size=args.texture_size, no_texture=args.no_texture,
-                       bake_faces=args.bake_faces, normal_map=args.normal_map, two_stage=args.two_stage)
+                       bake_faces=args.bake_faces, normal_map=args.normal_map, two_stage=args.two_stage,
+                       single_process=args.single_process)
     latents_path = args.latents or f"{args.output}.latents.pt"
 
     print("=" * 60)
@@ -191,6 +197,8 @@ def main(argv=None):
           f"texture={'none' if cfg['no_texture'] else cfg['texture_size']} bake_faces={cfg['bake_faces']} "
           f"normal_map={cfg['normal_map']} max_tokens={args.max_tokens}")
 
+    if args.attn_auto_gb is not None:
+        os.environ["ATTN_AUTO_GB"] = str(args.attn_auto_gb)
     if args.attn_tile:
         os.environ["ATTN_TILE"] = args.attn_tile
         print(f"attn_tile={args.attn_tile}: tiled attention, score matrix bounded to H x {args.attn_tile.replace(',', ' x ')}")

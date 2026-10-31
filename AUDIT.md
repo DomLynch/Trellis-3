@@ -177,6 +177,16 @@ than the fused path would be, but it should run. If too slow, larger tiles
 file produced on the Mac can be decoded on a CUDA machine with the official
 bake.
 
+### Batch 8 — 64 GB machine
+
+| Item | How | Result |
+|---|---|---|
+| Automatic tiling only when `B·H·L·S·4` exceeds the budget; chosen tile stays under budget/4; disabled at 0 | `tests/test_attention_mps.py` | pass |
+| `hero` preset; `--single-process` overrides a preset's two-stage | `tests/test_presets.py` | pass |
+
+125 tests. Defaults unchanged for 24 GB users (the 6 GB auto budget tiles
+the 1024 pass there, which is what the profile showed was needed).
+
 ### First Mac measurements (reported by the Mac tester, 31 Oct 2026)
 
 - Peak memory 14.4 GB vs 20.6 GB upstream, same method (−30%). Confirms the

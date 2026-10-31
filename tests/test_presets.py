@@ -47,3 +47,11 @@ def test_master_preset_and_new_keys():
     assert d["bake_faces"] == 200_000 and d["normal_map"] is False and d["two_stage"] is False
     o = apply_preset("master", bake_faces=300_000, texture_size=2048)
     assert o["bake_faces"] == 300_000 and o["texture_size"] == 2048 and o["normal_map"] is True
+
+
+def test_hero_preset_and_single_process():
+    h = apply_preset("hero")
+    assert h["pipeline_type"] == "1536_cascade" and h["texture_size"] == 8192 and h["bake_faces"] == 2_000_000
+    assert h["two_stage"] is True and h["normal_map"] is True
+    assert apply_preset("hero", single_process=True)["two_stage"] is False
+    assert apply_preset("master", single_process=True)["two_stage"] is False
