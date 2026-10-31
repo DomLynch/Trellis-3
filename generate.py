@@ -25,6 +25,7 @@ from PIL import Image as PILImage
 from trellis3 import memory
 from trellis3.export import export_mesh
 from trellis3.presets import PRESETS, apply_preset
+from trellis3.receipt import write_receipt
 from trellis3.runner import Runner, WatchdogError
 from trellis3.thermal import wait_until_cool
 
@@ -51,7 +52,29 @@ def build_parser():
                    help="Do not flush the MPS allocator cache between stages")
     p.add_argument("--no-thermal-guard", action="store_true",
                    help="Do not wait for CPU_Speed_Limit to recover before generating")
+    bake = p.add_argument_group("bake (Metal path)")
+    bake.add_argument("--metallic-factor", type=float, default=0.0,
+                      help="Pin glTF metallicFactor (upstream 1.0; default 0.0 = non-metal). -1 leaves upstream")
+    bake.add_argument("--gamma", type=float, default=None,
+                      help="Apply 1/gamma to base colour, e.g. 2.2 if output looks too dark")
+    bake.add_argument("--no-fix-winding", action="store_true",
+                      help="Skip the consistent-winding pass before baking")
+    bake.add_argument("--uv-cone-deg", type=float, default=None,
+                      help="UV chart cone half-angle (upstream 90); larger = fewer charts")
+    bake.add_argument("--uv-smooth", type=float, default=None,
+                      help="UV chart smoothing strength (upstream 1); larger = fewer charts")
+    p.add_argument("--no-receipt", action="store_true", help="Do not write <output>.receipt.json")
     return p
+
+
+def bake_kwargs(args):
+    return {
+        "metallic_factor": None if args.metallic_factor < 0 else args.metallic_factor,
+        "gamma": args.gamma,
+        "fix_winding": not args.no_fix_winding,
+        "uv_cone_deg": args.uv_cone_deg,
+        "uv_smooth": args.uv_smooth,
+    }
 
 
 def main(argv=None):
@@ -91,11 +114,20 @@ def main(argv=None):
     print(f"\nMesh: {mesh.vertices.shape[0]:,} vertices, {mesh.faces.shape[0]:,} triangles")
     print(f"Generation time: {t_gen:.1f}s")
 
-    export_mesh(mesh, args.output, texture_size=cfg["texture_size"], no_texture=cfg["no_texture"])
+    t1 = time.time()
+    outputs = export_mesh(mesh, args.output, texture_size=cfg["texture_size"],
+                          no_texture=cfg["no_texture"], **bake_kwargs(args))
+    t_bake = time.time() - t1
 
     rss = memory.rss_gb()
     if rss:
         print(f"Peak RSS: {rss:.1f} GB")
+    if not args.no_receipt:
+        settings = {**cfg, "seed": args.seed, "max_num_tokens": args.max_tokens,
+                    "resident": args.resident, **bake_kwargs(args)}
+        rp = write_receipt(args.output, settings, args.image, outputs,
+                           {"generate": round(t_gen, 1), "bake": round(t_bake, 1)}, peak_rss_gb=rss)
+        print(f"Receipt: {rp}")
     print(f"\nTotal time: {time.time() - t0:.1f}s generation + baking")
 
 

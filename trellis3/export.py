@@ -70,9 +70,29 @@ def _simplify(verts_np, faces_np, target_faces, log):
     return fast_simplification.simplify(verts_np, faces_np, ratio)
 
 
+def _fix_winding(sv, sf, enabled, log):
+    if not enabled:
+        return sv, sf
+    from trellis3.postbake import fix_winding
+    t0 = time.time()
+    sv, sf, flipped = fix_winding(sv, sf)
+    log(f"  Winding pass: {flipped:,} faces flipped ({time.time() - t0:.1f}s)")
+    return sv, sf
+
+
 def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
-                bake_faces=200000, log=print):
-    """Write <output>.glb (+ textures) and <output>.obj. Returns dict of paths."""
+                bake_faces=200000, metallic_factor=0.0, gamma=None, fix_winding=True,
+                uv_cone_deg=None, uv_smooth=None, log=print):
+    """Write <output>.glb (+ textures) and <output>.obj. Returns dict of paths.
+
+    metallic_factor: pins glTF metallicFactor on the Metal path (upstream 1.0;
+        model metallic drifts high on MPS, so default 0.0). None = leave as is.
+    gamma: optional 1/gamma curve on base colour for the Metal path, which
+        writes linear values (the KDTree path already applies 2.2).
+    fix_winding: consistent outward winding on the simplified mesh before bake.
+    uv_cone_deg / uv_smooth: chart clustering knobs passed to to_glb; larger
+        values mean fewer, bigger UV charts (upstream 90 / 1).
+    """
     verts = mesh_out.vertices.cpu().numpy()
     faces = mesh_out.faces.cpu().numpy()
     if verts.shape[0] == 0 or faces.shape[0] == 0:
@@ -89,10 +109,17 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
             try:
                 log(f"\nBaking PBR textures via Metal ({texture_size}x{texture_size})...")
                 import o_voxel
+                from trellis3.postbake import apply_gamma, set_metallic_factor
                 target_faces = min(bake_faces, len(faces))
                 sv, sf = _simplify(verts, faces, target_faces, log)
+                sv, sf = _fix_winding(sv, sf, fix_winding, log)
                 simp_verts_t = torch.from_numpy(np.ascontiguousarray(sv)).float()
                 simp_faces_t = torch.from_numpy(np.ascontiguousarray(sf).astype("int32"))
+                uv_kwargs = {}
+                if uv_cone_deg is not None:
+                    uv_kwargs["mesh_cluster_threshold_cone_half_angle_rad"] = np.radians(uv_cone_deg)
+                if uv_smooth is not None:
+                    uv_kwargs["mesh_cluster_smooth_strength"] = uv_smooth
                 glb = o_voxel.postprocess.to_glb(
                     vertices=simp_verts_t,
                     faces=simp_faces_t,
@@ -104,7 +131,12 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                     decimation_target=target_faces,
                     texture_size=texture_size,
                     verbose=True,
+                    **uv_kwargs,
                 )
+                if set_metallic_factor(glb, metallic_factor):
+                    log(f"  metallicFactor pinned to {metallic_factor}")
+                if apply_gamma(glb, gamma):
+                    log(f"  gamma {gamma} applied to base colour")
                 glb.export(glb_path)
                 log(f"  Saved: {glb_path}")
                 paths["glb"] = glb_path
@@ -120,6 +152,7 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
 
             target_faces = min(bake_faces, len(faces))
             bv, bf = _simplify(verts, faces, target_faces, log)
+            bv, bf = _fix_winding(bv, bf, fix_winding, log)
             log("  UV unwrapping with xatlas...")
             new_verts, new_faces, uvs, _ = uv_unwrap(bv, bf)
             log(f"  UV unwrap: {len(verts):,} -> {len(new_verts):,} vertices")

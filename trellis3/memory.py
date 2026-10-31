@@ -158,6 +158,48 @@ def install_stage_hooks(pipeline, after=free_device_cache):
     return pipeline
 
 
+def parse_vm_stat(text, page_size=16384):
+    """Free + inactive + speculative pages from macOS `vm_stat` output, in GB."""
+    import re
+    m = re.search(r"page size of (\d+) bytes", text or "")
+    if m:
+        page_size = int(m.group(1))
+    total = 0
+    found = False
+    for key in ("Pages free", "Pages inactive", "Pages speculative"):
+        m = re.search(rf"{key}:\s+(\d+)", text or "")
+        if m:
+            total += int(m.group(1))
+            found = True
+    return total * page_size / 1e9 if found else None
+
+
+def parse_meminfo(text):
+    """MemAvailable from /proc/meminfo, in GB."""
+    import re
+    m = re.search(r"MemAvailable:\s+(\d+) kB", text or "")
+    return int(m.group(1)) / 1e6 if m else None
+
+
+def free_memory_gb():
+    """Best-effort available system memory in GB, or None."""
+    try:
+        import psutil
+        return psutil.virtual_memory().available / 1e9
+    except Exception:
+        pass
+    import subprocess
+    import sys
+    try:
+        if sys.platform == "darwin":
+            out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout
+            return parse_vm_stat(out)
+        with open("/proc/meminfo") as f:
+            return parse_meminfo(f.read())
+    except Exception:
+        return None
+
+
 def rss_gb():
     """Resident set size of this process in GB, or None if unavailable."""
     try:

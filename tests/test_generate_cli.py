@@ -41,13 +41,18 @@ def test_main_wiring(tmp_path, monkeypatch):
     monkeypatch.setattr(generate, "Runner", FakeRunner)
     monkeypatch.setattr(generate, "wait_until_cool", lambda *a, **k: seen.setdefault("thermal", True))
     monkeypatch.setattr(generate, "export_mesh",
-                        lambda mesh, out, **kw: seen.update(out=out, **kw))
+                        lambda mesh, out, **kw: seen.update(out=out, **kw) or {"faces": 1, "bake": "none"})
 
     generate.main([str(img), "--preset", "draft", "--seed", "7", "--output", str(tmp_path / "o"),
                    "--max-tokens", "30000"])
     assert seen["types"] == "512" and seen["pipeline_type"] == "512"
     assert seen["steps"] == 8 and seen["no_texture"] is True
     assert seen["seed"] == 7 and seen["tokens"] == 30000 and seen["thermal"] is True
+    assert seen["metallic_factor"] == 0.0 and seen["fix_winding"] is True and seen["gamma"] is None
+    import json
+    r = json.load(open(str(tmp_path / "o.receipt.json")))
+    assert r["settings"]["seed"] == 7 and r["settings"]["pipeline_type"] == "512"
+    assert r["input"]["size"] == [4, 4] and r["mesh"]["faces"] == 1
 
 
 def test_main_missing_image_exits(tmp_path):

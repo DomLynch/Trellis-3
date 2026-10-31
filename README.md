@@ -24,6 +24,12 @@ released, how jobs are run, and what happens to the mesh after decoding.
 | Thermal | — | waits for `pmset` `CPU_Speed_Limit` to recover before a job |
 | Metal stack check | silent fallbacks | `tools/check_metal.py` says what is actually active |
 | `1536_cascade`, 4096 textures | not selectable | selectable; need far more memory than 24 GB (see below) |
+| Metallic | Metal path exports `metallicFactor=1.0` × model metallic (chrome skin) | `--metallic-factor` pinned to 0.0 by default |
+| Base colour | Metal path writes linear (dark); KDTree path applies 1/2.2 | `--gamma 2.2` to match the two paths |
+| Face winding | Metal cumesh `unify_face_orientations` left ~half flipped | consistent outward winding pass on the simplified mesh before bake (default on) |
+| UV charts | 11–21K tiny charts ("confetti") | `--uv-cone-deg` / `--uv-smooth` passed to the chart clusterer (upstream 90 / 1) |
+| Run receipt | — | `<output>.receipt.json`: settings, input hash/size, output hashes, timings, peak RSS, versions |
+| Server memory guard | — | `serve.py --min-free-gb N` waits for free RAM before each job, fails the job after `--mem-wait` |
 
 Weight sizes are the bf16/fp16 checkpoints on Hugging Face. The 1024 cascade
 never uses `tex_slat_flow_model_512`; the 512 pipeline never uses either
@@ -78,7 +84,11 @@ Sidecar `inbox/cat.json` next to `inbox/cat.png` takes the same keys:
 `seed`, `seeds`, `preset`, `pipeline_type`, `steps`, `texture_size`,
 `no_texture`, `max_tokens`. Output goes to `outbox/cat/seed<N>.glb|.obj`.
 `--pipeline-types 512,1024_cascade` preloads both; otherwise a new type
-loads lazily on first use and stays loaded.
+loads lazily on first use and stays loaded. Bake keys (`metallic_factor`,
+`gamma`, `fix_winding`, `uv_cone_deg`, `uv_smooth`) are accepted per job.
+`--min-free-gb 6` makes the server wait (up to `--mem-wait` seconds) for
+free RAM before starting a job instead of swapping. Every output gets a
+`.receipt.json`.
 
 ## generate.py options
 
@@ -91,6 +101,12 @@ loads lazily on first use and stays loaded.
 --resident                keep models on MPS instead of CPU shuttling (opt-in, unmeasured)
 --no-stage-hooks          don't flush the MPS cache between stages
 --no-thermal-guard        don't wait for the CPU to cool
+--metallic-factor F       pin glTF metallicFactor (default 0.0; -1 keeps upstream's 1.0)
+--gamma G                 apply 1/G to base colour on the Metal path (try 2.2 if dark)
+--no-fix-winding          skip the winding pass before the bake
+--uv-cone-deg D           UV chart cone half-angle (upstream 90); larger = fewer charts
+--uv-smooth S             UV chart smoothing (upstream 1); larger = fewer charts
+--no-receipt              don't write <output>.receipt.json
 ```
 
 Explicit flags override the preset.

@@ -139,3 +139,28 @@ def test_free_device_cache_is_safe_on_cpu():
 def test_rss_gb_returns_number_or_none():
     r = memory.rss_gb()
     assert r is None or r > 0
+
+
+VM_STAT = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                               12345.
+Pages active:                            500000.
+Pages inactive:                          100000.
+Pages speculative:                         5000.
+Pages throttled:                              0.
+"""
+
+
+def test_parse_vm_stat():
+    gb = memory.parse_vm_stat(VM_STAT)
+    assert abs(gb - (12345 + 100000 + 5000) * 16384 / 1e9) < 1e-6
+    assert memory.parse_vm_stat("") is None
+
+
+def test_parse_meminfo():
+    assert memory.parse_meminfo("MemTotal: 10 kB\nMemAvailable:  4000000 kB\n") == 4.0
+    assert memory.parse_meminfo("nothing") is None
+
+
+def test_free_memory_gb_runs():
+    v = memory.free_memory_gb()
+    assert v is None or v > 0

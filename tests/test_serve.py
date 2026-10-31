@@ -160,3 +160,44 @@ def test_http_roundtrip(png, tmp_path, fake_export):
     finally:
         stop.set()
         httpd.shutdown()
+
+
+def test_parse_job_bake_options(png):
+    job = serve.parse_job({"metallic_factor": -1, "gamma": 2.2, "fix_winding": False,
+                           "uv_cone_deg": 120}, png, "o")
+    assert job["bake"] == {"metallic_factor": None, "gamma": 2.2, "fix_winding": False,
+                           "uv_cone_deg": 120, "uv_smooth": None}
+    assert serve.parse_job({}, png, "o")["bake"]["metallic_factor"] == 0.0
+
+
+def test_wait_for_memory(monkeypatch):
+    monkeypatch.setattr(serve.time, "sleep", lambda s: None)
+    seq = iter([2.0, 3.0, 9.0])
+    ok, free = serve.wait_for_memory(8.0, max_wait=60, log=lambda *_: None, probe=lambda: next(seq))
+    assert ok and free == 9.0
+    assert serve.wait_for_memory(0, 60) == (True, None)
+    assert serve.wait_for_memory(8.0, 60, probe=lambda: None) == (True, None)  # unknown never blocks
+    t = iter([0, 0, 100, 200, 300])
+    monkeypatch.setattr(serve.time, "time", lambda: next(t))
+    ok, free = serve.wait_for_memory(8.0, max_wait=50, log=lambda *_: None, probe=lambda: 1.0)
+    assert not ok and free == 1.0
+
+
+def test_run_one_skips_job_on_low_memory(png, tmp_path, fake_export, monkeypatch):
+    monkeypatch.setattr(serve, "wait_for_memory", lambda *a, **k: (False, 1.5))
+    srv = serve.JobServer(lambda: _FakeRunner(), str(tmp_path), thermal_guard=False,
+                          min_free_gb=8, log=lambda *_: None)
+    job = serve.parse_job({}, png, str(tmp_path))
+    res = srv.run_one(srv.submit(job), job)
+    assert res["status"] == "failed" and "low memory" in res["error"]
+    assert srv.jobs_done == 1
+
+
+def test_run_one_writes_receipts(png, tmp_path, fake_export):
+    srv = serve.JobServer(lambda: _FakeRunner(), str(tmp_path / "out"), thermal_guard=False,
+                          log=lambda *_: None)
+    job = serve.parse_job({"seeds": [5], "gamma": 2.2}, png, str(tmp_path / "out"))
+    res = srv.run_one(srv.submit(job), job)
+    r = json.load(open(res["outputs"][0]["receipt"]))
+    assert r["settings"]["seed"] == 5 and r["settings"]["bake"]["gamma"] == 2.2
+    assert r["job_id"].endswith("-1") and r["input"]["size"] == [8, 8]

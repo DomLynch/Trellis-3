@@ -10,7 +10,9 @@ memory and accepts jobs two ways:
       Drop a PNG/JPG into inbox/. Output lands in outbox/<name>/.
       Optional sidecar inbox/<name>.json: {"seed": 7, "seeds": [1,2,3],
       "preset": "draft", "pipeline_type": "1024_cascade", "steps": 8,
-      "texture_size": 2048, "no_texture": false}
+      "texture_size": 2048, "no_texture": false, "max_tokens": 49152,
+      "metallic_factor": 0.0, "gamma": 2.2, "fix_winding": true,
+      "uv_cone_deg": 120, "uv_smooth": 2}
 
   HTTP
       python serve.py --http 127.0.0.1:8765
@@ -40,6 +42,7 @@ from PIL import Image as PILImage
 from trellis3 import memory
 from trellis3.export import export_mesh, output_stem
 from trellis3.presets import apply_preset
+from trellis3.receipt import write_receipt
 from trellis3.runner import Runner, WatchdogError
 from trellis3.thermal import wait_until_cool
 
@@ -56,22 +59,50 @@ def parse_job(spec, image, out_dir):
     seeds = spec.get("seeds") or [spec.get("seed", 42)]
     seeds = [int(s) for s in seeds]
     stem = os.path.splitext(os.path.basename(image))[0]
+    mf = spec.get("metallic_factor", 0.0)
     return {
         "image": image,
         "seeds": seeds,
         "out_dir": os.path.join(out_dir, stem),
         "max_num_tokens": int(spec.get("max_tokens", 49152)),
+        "bake": {
+            "metallic_factor": None if mf is None or float(mf) < 0 else float(mf),
+            "gamma": spec.get("gamma"),
+            "fix_winding": bool(spec.get("fix_winding", True)),
+            "uv_cone_deg": spec.get("uv_cone_deg"),
+            "uv_smooth": spec.get("uv_smooth"),
+        },
         **cfg,
     }
+
+
+def wait_for_memory(min_free_gb, max_wait, poll=10, log=print, probe=None):
+    """Block until free memory >= min_free_gb. Returns (ok, last_reading)."""
+    probe = probe or memory.free_memory_gb
+    if not min_free_gb:
+        return True, None
+    deadline = time.time() + max_wait
+    free = probe()
+    while free is not None and free < min_free_gb:
+        if time.time() >= deadline:
+            return False, free
+        log(f"Memory guard: {free:.1f} GB free < {min_free_gb} GB floor; waiting...")
+        time.sleep(poll)
+        free = probe()
+    return True, free
 
 
 class JobServer:
     """Owns the Runner and a FIFO queue. `generate_fn` is injectable for tests."""
 
-    def __init__(self, runner_factory, out_dir, thermal_guard=True, log=print):
+    def __init__(self, runner_factory, out_dir, thermal_guard=True, min_free_gb=0.0,
+                 mem_wait=300, receipts=True, log=print):
         self.log = log
         self.out_dir = out_dir
         self.thermal_guard = thermal_guard
+        self.min_free_gb = min_free_gb
+        self.mem_wait = mem_wait
+        self.receipts = receipts
         self.queue = queue.Queue()
         self.results = {}
         self.jobs_done = 0
@@ -99,6 +130,13 @@ class JobServer:
                  f"pipeline={job['pipeline_type']} ===")
         if self.thermal_guard:
             wait_until_cool(log=self.log)
+        ok, free = wait_for_memory(self.min_free_gb, self.mem_wait, log=self.log)
+        if not ok:
+            self.results[job_id].update(status="failed", error=f"low memory: {free:.1f} GB free",
+                                        outputs=[])
+            self.log(f"  job skipped: only {free:.1f} GB free (floor {self.min_free_gb} GB)")
+            self.jobs_done += 1
+            return self.results[job_id]
         outputs = []
         try:
             img = PILImage.open(job["image"])
@@ -106,11 +144,19 @@ class JobServer:
                 t0 = time.time()
                 mesh = self.runner.generate(img, seed=seed, pipeline_type=job["pipeline_type"],
                                             steps=job["steps"], max_num_tokens=job["max_num_tokens"])
+                t_gen = time.time() - t0
                 stem = output_stem(f"seed{seed}", job["out_dir"])
                 paths = export_mesh(mesh, stem, texture_size=job["texture_size"],
-                                    no_texture=job["no_texture"], log=self.log)
+                                    no_texture=job["no_texture"], log=self.log, **job["bake"])
                 paths["seed"] = seed
                 paths["seconds"] = round(time.time() - t0, 1)
+                if self.receipts:
+                    settings = {k: v for k, v in job.items() if k not in ("image", "seeds", "out_dir")}
+                    settings["seed"] = seed
+                    paths["receipt"] = write_receipt(
+                        stem, settings, job["image"], paths,
+                        {"generate": round(t_gen, 1), "bake": round(time.time() - t0 - t_gen, 1)},
+                        peak_rss_gb=memory.rss_gb(), extra={"job_id": job_id})
                 outputs.append(paths)
                 self.log(f"  seed {seed}: {paths['faces']:,} faces in {paths['seconds']}s")
             self.results[job_id].update(status="done", outputs=outputs)
@@ -228,13 +274,19 @@ def main(argv=None):
                    help="Comma-separated types to preload (others load lazily on first use)")
     p.add_argument("--resident", action="store_true", help="Keep models on the GPU (low_vram=False)")
     p.add_argument("--no-thermal-guard", action="store_true")
+    p.add_argument("--min-free-gb", type=float, default=0.0,
+                   help="Wait until this much system memory is free before each job (0 = off)")
+    p.add_argument("--mem-wait", type=int, default=300,
+                   help="Seconds to wait for memory before failing the job (default 300)")
+    p.add_argument("--no-receipts", action="store_true", help="Do not write .receipt.json per output")
     args = p.parse_args(argv)
     if not args.watch and not args.http:
         p.error("give --watch and/or --http")
 
     types = [t.strip() for t in args.pipeline_types.split(",") if t.strip()]
     server = JobServer(lambda: Runner(types, resident=args.resident), args.out,
-                       thermal_guard=not args.no_thermal_guard)
+                       thermal_guard=not args.no_thermal_guard, min_free_gb=args.min_free_gb,
+                       mem_wait=args.mem_wait, receipts=not args.no_receipts)
     server.runner  # load now, not on first job
 
     stop = threading.Event()

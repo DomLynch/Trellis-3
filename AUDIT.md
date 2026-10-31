@@ -28,6 +28,25 @@ cloned and used for the patch tests; no model weights were downloaded.
 
 54 tests, 2.7 s.
 
+### Batch 2 (same day) — verified here
+
+| Item | How | Result |
+|---|---|---|
+| `metallicFactor` pinned on Trimesh and Scene materials; `None` leaves it | `tests/test_postbake.py` | pass |
+| Gamma curve brightens RGB, keeps alpha, no-op for None/1.0 | same | pass |
+| Winding pass repairs a half-flipped icosphere to consistent + outward; no-op on a good mesh | same | pass |
+| Metal-path wiring: winding fix runs before `to_glb`, UV kwargs / texture size reach it, metallic + gamma applied to its return value | `tests/test_export.py::test_metal_path_wiring` with a fake `o_voxel` | pass |
+| Receipt JSON: settings, input size + sha256, output hashes, missing files skipped, timings, RSS, env, extra | `tests/test_receipt.py` | pass |
+| `vm_stat` and `/proc/meminfo` parsers | `tests/test_memory.py` | pass |
+| Memory guard waits, passes, gives up at `max_wait`, never blocks on unknown | `tests/test_serve.py` | pass |
+| Server skips a job on low memory and keeps running; writes a receipt per seed | same | pass |
+| CLI: bake flags reach `export_mesh`, receipt written | `tests/test_generate_cli.py` | pass |
+
+68 tests, 2.5 s. Not verified: the real `to_glb` accepting the UV kwargs by
+keyword (names were read from Pedro's `postprocess.py` signature, lines 88–91),
+and whether `fix_normals` on a 200K-face decoder mesh is fast enough (trimesh
+graph traversal; expect seconds, not minutes).
+
 ## Not verified — needs one run on a Mac
 
 1. **End-to-end generation on MPS.** Nothing here ran the real pipeline. The
