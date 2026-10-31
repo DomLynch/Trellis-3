@@ -187,3 +187,17 @@ def test_fdg_patch_native_opt_in(tmp_path, monkeypatch):
     compile(src, "fdg_vae.py", "exec")
     before = src; pc.patch_fdg_vae()
     assert (d / "fdg_vae.py").read_text() == before
+
+
+def test_rembg_choice_patch(tmp_path, monkeypatch, trellis2_src):
+    root = tmp_path / "TRELLIS.2"
+    d = root / "trellis2/pipelines"; d.mkdir(parents=True)
+    shutil.copy(os.path.join(trellis2_src, "trellis2/pipelines/trellis2_image_to_3d.py"), d / "trellis2_image_to_3d.py")
+    monkeypatch.setattr(pc, "TRELLIS_ROOT", str(root))
+    pc.patch_pipeline()
+    src = (d / "trellis2_image_to_3d.py").read_text()
+    assert "TRELLIS3_REMBG" in src and "_rembg_args['model_name'] = _rembg_choice" in src
+    assert "No background remover loaded" in src
+    compile(src, "p.py", "exec")
+    before = src; pc.patch_pipeline()
+    assert (d / "trellis2_image_to_3d.py").read_text() == before

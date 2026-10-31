@@ -280,6 +280,21 @@ intentional opening. Each loop is closed with a centroid fan wound to match
 the surrounding surface. Loops that share a vertex (non-manifold boundary)
 are left alone rather than guessed. 327K-face mesh with 10 holes: 0.2 s.
 
+## Licence trap: the background remover
+
+Upstream's default background remover is `briaai/RMBG-2.0`, which is
+**CC BY-NC 4.0 — non-commercial**. TRELLIS.2 itself is MIT. For anything you
+ship, either:
+
+```bash
+export TRELLIS3_REMBG=ZhengPeng7/BiRefNet   # MIT checkpoint, same BiRefNet class
+# or
+export TRELLIS3_REMBG=none                   # and feed RGBA images that are already cut out
+```
+
+DINOv3 (the image encoder) is under Meta's DINOv3 licence — gated, read it
+for your use. Everything else in the pipeline is MIT.
+
 ## Credits
 
 - [TRELLIS.2](https://github.com/microsoft/TRELLIS.2) — Microsoft Research

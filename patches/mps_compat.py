@@ -457,12 +457,56 @@ def patch_pipeline():
 
     if "if torch.cuda.is_available():" in src:
         print(f"  Already patched: {os.path.relpath(path, TRELLIS_ROOT)}")
-        return
+    else:
+        src = src.replace(
+            "        torch.cuda.empty_cache()\n",
+            "        if torch.cuda.is_available():\n"
+            "            torch.cuda.empty_cache()\n",
+        )
+        write_file(path, src)
+    patch_rembg_choice()
 
+
+_REMBG_LINE = "        pipeline.rembg_model = getattr(rembg, args['rembg_model']['name'])(**args['rembg_model']['args'])\n"
+_REMBG_NEW = (
+    "        # Trellis-3: the default background remover (briaai/RMBG-2.0) is\n"
+    "        # CC BY-NC 4.0 -- non-commercial. TRELLIS3_REMBG names a different\n"
+    "        # BiRefNet checkpoint (e.g. ZhengPeng7/BiRefNet, MIT); 'none' skips\n"
+    "        # loading one at all (pass RGBA inputs that are already cut out).\n"
+    "        import os as _os\n"
+    "        _rembg_choice = _os.environ.get('TRELLIS3_REMBG', '').strip()\n"
+    "        if _rembg_choice.lower() == 'none':\n"
+    "            pipeline.rembg_model = None\n"
+    "        else:\n"
+    "            _rembg_args = dict(args['rembg_model']['args'])\n"
+    "            if _rembg_choice:\n"
+    "                _rembg_args['model_name'] = _rembg_choice\n"
+    "            pipeline.rembg_model = getattr(rembg, args['rembg_model']['name'])(**_rembg_args)\n"
+)
+
+
+def patch_rembg_choice():
+    """Let TRELLIS3_REMBG pick the background-removal checkpoint (or none)."""
+    path = os.path.join(TRELLIS_ROOT, "trellis2/pipelines/trellis2_image_to_3d.py")
+    src = read_file(path)
+    if "TRELLIS3_REMBG" in src:
+        print(f"  Already patched (rembg): {os.path.relpath(path, TRELLIS_ROOT)}")
+        return
+    if _REMBG_LINE not in src:
+        raise RuntimeError(f"could not locate the rembg_model line in {path}")
+    src = src.replace(_REMBG_LINE, _REMBG_NEW, 1)
+    # preprocess_image must not call a None remover
     src = src.replace(
-        "        torch.cuda.empty_cache()\n",
-        "        if torch.cuda.is_available():\n"
-        "            torch.cuda.empty_cache()\n",
+        "            input = input.convert('RGB')\n"
+        "            if self.low_vram:\n"
+        "                self.rembg_model.to(self.device)\n",
+        "            input = input.convert('RGB')\n"
+        "            if self.rembg_model is None:\n"
+        "                raise RuntimeError('No background remover loaded (TRELLIS3_REMBG=none): '\n"
+        "                                   'give an RGBA image with the background already removed')\n"
+        "            if self.low_vram:\n"
+        "                self.rembg_model.to(self.device)\n",
+        1,
     )
     write_file(path, src)
 
