@@ -11,7 +11,15 @@ Slower than flex_gemm/spconv but fully portable.
 import math
 import torch
 import torch.nn as nn
-from .. import SparseTensor
+try:
+    from .. import SparseTensor
+except ImportError:                    # imported as backends.conv_none (tests): hints only
+    SparseTensor = object
+
+try:                                   # installed into trellis2/modules/sparse/conv/
+    from .t3_voxel_lookup import CoordIndex
+except ImportError:                    # imported as backends.conv_none (tests)
+    from .voxel_lookup import CoordIndex
 
 
 def sparse_conv3d_init(self, in_channels, out_channels, kernel_size, stride=1, dilation=1, padding=None, bias=True, indice_key=None):
@@ -41,6 +49,38 @@ def sparse_conv3d_init(self, in_channels, out_channels, kernel_size, stride=1, d
     self.weight = nn.Parameter(self.weight.permute(0, 2, 3, 4, 1).contiguous())
 
 
+def build_neighbor_map(coords, kernel_size, dilation, device):
+    """(src, tgt, kernel_idx) edge lists for a submanifold conv, vectorised.
+
+    Trellis-3: replaces the dict-of-tuples + triple Python loop (N x K^3
+    membership tests through .tolist()) with one sorted-key lookup per
+    kernel offset. Same output order semantics are not required: the forward
+    pass groups edges by kernel index.
+    """
+    Kd, Kh, Kw = kernel_size
+    dz, dy, dx = dilation
+    coords_cpu = coords.cpu()
+    N = coords_cpu.shape[0]
+    index = CoordIndex(coords_cpu)
+    src, tgt, kid = [], [], []
+    tgt_all = torch.arange(N, dtype=torch.long)
+    for kz in range(Kd):
+        for ky in range(Kh):
+            for kx in range(Kw):
+                offset = torch.tensor([0, (kz - Kd // 2) * dz, (ky - Kh // 2) * dy, (kx - Kw // 2) * dx],
+                                      dtype=torch.int64)
+                j = index.lookup(coords_cpu.to(torch.int64) + offset)
+                hit = j >= 0
+                if hit.any():
+                    src.append(j[hit])
+                    tgt.append(tgt_all[hit])
+                    kid.append(torch.full((int(hit.sum()),), kz * Kh * Kw + ky * Kw + kx, dtype=torch.long))
+    if not src:
+        e = torch.zeros(0, dtype=torch.long, device=device)
+        return e, e.clone(), e.clone()
+    return (torch.cat(src).to(device), torch.cat(tgt).to(device), torch.cat(kid).to(device))
+
+
 def sparse_conv3d_forward(self, x: SparseTensor) -> SparseTensor:
     """
     Submanifold sparse 3D convolution via gather-scatter.
@@ -62,41 +102,7 @@ def sparse_conv3d_forward(self, x: SparseTensor) -> SparseTensor:
     neighbor_cache = x.get_spatial_cache(cache_key)
 
     if neighbor_cache is None:
-        # Build spatial hash: coord tuple -> voxel index
-        coord_to_idx = {}
-        coords_cpu = coords.cpu()
-        for i in range(N):
-            key = tuple(coords_cpu[i].tolist())
-            coord_to_idx[key] = i
-
-        # For each kernel position, find (source, target) voxel pairs
-        dz, dy, dx = self.dilation
-        src_indices = []
-        tgt_indices = []
-        kernel_indices = []
-
-        for kz in range(Kd):
-            for ky in range(Kh):
-                for kx in range(Kw):
-                    oz = (kz - Kd // 2) * dz
-                    oy = (ky - Kh // 2) * dy
-                    ox = (kx - Kw // 2) * dx
-                    k_idx = kz * Kh * Kw + ky * Kw + kx
-
-                    for i in range(N):
-                        b, z, y, xc = coords_cpu[i].tolist()
-                        neighbor_key = (b, z + oz, y + oy, xc + ox)
-                        if neighbor_key in coord_to_idx:
-                            j = coord_to_idx[neighbor_key]
-                            src_indices.append(j)
-                            tgt_indices.append(i)
-                            kernel_indices.append(k_idx)
-
-        neighbor_cache = (
-            torch.tensor(src_indices, dtype=torch.long, device=device),
-            torch.tensor(tgt_indices, dtype=torch.long, device=device),
-            torch.tensor(kernel_indices, dtype=torch.long, device=device),
-        )
+        neighbor_cache = build_neighbor_map(coords, (Kd, Kh, Kw), self.dilation, device)
         x.register_spatial_cache(cache_key, neighbor_cache)
 
     src_idx, tgt_idx, k_idx = neighbor_cache

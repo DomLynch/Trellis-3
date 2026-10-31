@@ -31,6 +31,9 @@ released, how jobs are run, and what happens to the mesh after decoding.
 | Run receipt | — | `<output>.receipt.json`: settings, input hash/size, output hashes, timings, peak RSS, versions |
 | Server memory guard | — | `serve.py --min-free-gb N` waits for free RAM before each job, fails the job after `--mem-wait` |
 | Full-res detail in the bake | mtlbvh can't take the 800K-face decoder mesh, so the bake only ever sees the 200K simplified copy | CPU nearest-surface index on the full mesh: texels snap onto it before colour sampling (KDTree path) and `--normal-map` bakes a tangent-space normal map from it (both paths) |
+| 1024 attention memory | one SDPA call over all ~49K tokens, plus a padded copy of Q/K/V even for a single sequence | `--attn-chunk N` splits queries into chunks (exact; bounds the score matrix to H×N×S); uniform batches are zero-copy views |
+| Coordinate lookups | Python dict of tuples + `.item()` loops in mesh extraction and the naive sparse conv (minutes and GBs at 1024) | sorted int64 keys + `searchsorted`: 3.6M voxels / 14M queries in 2.3 s |
+| Memory attribution | — | `--profile-memory`: per-stage peak RSS / MPS driver / MPS allocator, printed and stored in the receipt |
 | Colour match | `--gamma 2.2` overshoots (measured: 2.2 gives 0.53/0.45/0.40 vs photo 0.40/0.28/0.24) | `--gamma auto` solves the gamma that matches the texture's mean to the input photo; `--gamma 1.7` if you want it fixed |
 
 Weight sizes are the bf16/fp16 checkpoints on Hugging Face. The 1024 cascade
@@ -103,6 +106,8 @@ free RAM before starting a job instead of swapping. Every output gets a
 --resident                keep models on MPS instead of CPU shuttling (opt-in, unmeasured)
 --no-stage-hooks          don't flush the MPS cache between stages
 --no-thermal-guard        don't wait for the CPU to cool
+--attn-chunk N            query-chunked full attention (try 4096 at 1024/1536); exact, memory-bounded
+--profile-memory          per-stage memory table (RSS, MPS driver, MPS allocator) + receipt entry
 --metallic-factor F       pin glTF metallicFactor (default 0.0; -1 keeps upstream's 1.0)
 --gamma G|auto            apply 1/G to base colour on the Metal path; auto matches the photo (≈1.6–1.7 on heads)
 --normal-map              bake a normal map from the full-res decoder mesh (CPU, ~20 s at 2048)
@@ -121,8 +126,11 @@ Explicit flags override the preset.
 - `512`: should drop from upstream's ~18–20 GB peak to roughly 13–15 GB
   (5.2 GB of unused 1024 weights no longer loaded). Not yet measured.
 - `1024_cascade`: upstream 28–31 GB (swapping). This fork removes 2.6 GB of
-  weights; the rest is activations. Use `--max-tokens 32768` or lower to
-  trade resolution for memory. Still likely to swap on 24 GB.
+  weights, the dict-based mesh extraction (GBs of Python objects at this
+  size), and the padded Q/K/V copies; `--attn-chunk 4096` bounds attention
+  if PyTorch's MPS kernel materialises the score matrix. Run once with
+  `--profile-memory` — the stage table says what is left. `--max-tokens 32768`
+  trades resolution for memory as a last resort.
 - `1536_cascade`: about 3.4× the voxels of 1024. Needs 64 GB+ in practice.
 - 4096 textures: 4× the texels of 2048 through the Metal baker. Untested.
 

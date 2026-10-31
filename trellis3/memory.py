@@ -139,18 +139,22 @@ STAGE_METHODS = ("sample_sparse_structure", "sample_shape_slat",
 def install_stage_hooks(pipeline, after=free_device_cache):
     """Wrap each sampling/decoding stage so `after()` runs when it returns.
 
+    Also tells the memory profiler (if one is active) which stage is running.
     Idempotent: a pipeline already hooked is left alone.
     """
     if getattr(pipeline, "_trellis3_hooked", False):
         return pipeline
+    from trellis3 import profile as _profile
     for name in STAGE_METHODS:
         fn = getattr(pipeline, name, None)
         if fn is None:
             continue
 
-        def wrapped(*a, _fn=fn, **kw):
+        def wrapped(*a, _fn=fn, _name=name, **kw):
+            _profile.mark(_name)
             out = _fn(*a, **kw)
             after()
+            _profile.mark(f"after:{_name}")
             return out
 
         setattr(pipeline, name, wrapped)

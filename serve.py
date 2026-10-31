@@ -283,7 +283,11 @@ def main(argv=None):
     p.add_argument("--mem-wait", type=int, default=300,
                    help="Seconds to wait for memory before failing the job (default 300)")
     p.add_argument("--no-receipts", action="store_true", help="Do not write .receipt.json per output")
+    p.add_argument("--attn-chunk", type=int, default=0,
+                   help="Split full attention into query chunks of N rows (0 = off)")
     args = p.parse_args(argv)
+    if args.attn_chunk:
+        os.environ["ATTN_CHUNK"] = str(args.attn_chunk)
     if not args.watch and not args.http:
         p.error("give --watch and/or --http")
 

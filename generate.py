@@ -58,6 +58,10 @@ def build_parser():
                    help="Do not flush the MPS allocator cache between stages")
     p.add_argument("--no-thermal-guard", action="store_true",
                    help="Do not wait for CPU_Speed_Limit to recover before generating")
+    p.add_argument("--attn-chunk", type=int, default=0,
+                   help="Split full attention into query chunks of N rows (0 = off). Bounds attention memory at 1024/1536")
+    p.add_argument("--profile-memory", action="store_true",
+                   help="Sample RSS/MPS memory per stage; print a table and store it in the receipt")
     bake = p.add_argument_group("bake (Metal path)")
     bake.add_argument("--metallic-factor", type=float, default=0.0,
                       help="Pin glTF metallicFactor (upstream 1.0; default 0.0 = non-metal). -1 leaves upstream")
@@ -109,6 +113,14 @@ def main(argv=None):
     print(f"preset={args.preset or '-'} pipeline={cfg['pipeline_type']} steps={cfg['steps'] or 'default'} "
           f"texture={'none' if cfg['no_texture'] else cfg['texture_size']} max_tokens={args.max_tokens}")
 
+    if args.attn_chunk:
+        os.environ["ATTN_CHUNK"] = str(args.attn_chunk)
+    profiler = None
+    if args.profile_memory:
+        from trellis3.profile import Profiler, activate
+        profiler = Profiler().start("load")
+        activate(profiler)
+
     runner = Runner(cfg["pipeline_type"], resident=args.resident,
                     stage_hooks=not args.no_stage_hooks)
 
@@ -130,6 +142,8 @@ def main(argv=None):
     print(f"\nMesh: {mesh.vertices.shape[0]:,} vertices, {mesh.faces.shape[0]:,} triangles")
     print(f"Generation time: {t_gen:.1f}s")
 
+    if profiler:
+        profiler.mark("export")
     t1 = time.time()
     outputs = export_mesh(mesh, args.output, texture_size=cfg["texture_size"],
                           no_texture=cfg["no_texture"], reference_image=args.image,
@@ -139,11 +153,19 @@ def main(argv=None):
     rss = memory.rss_gb()
     if rss:
         print(f"Peak RSS: {rss:.1f} GB")
+    extra = None
+    if profiler:
+        from trellis3.profile import activate
+        prof = profiler.stop()
+        activate(None)
+        print("\nMemory profile (peak per stage):\n" + profiler.table())
+        extra = {"memory_profile": prof}
     if not args.no_receipt:
         settings = {**cfg, "seed": args.seed, "max_num_tokens": args.max_tokens,
-                    "resident": args.resident, **bake_kwargs(args)}
+                    "resident": args.resident, "attn_chunk": args.attn_chunk, **bake_kwargs(args)}
         rp = write_receipt(args.output, settings, args.image, outputs,
-                           {"generate": round(t_gen, 1), "bake": round(t_bake, 1)}, peak_rss_gb=rss)
+                           {"generate": round(t_gen, 1), "bake": round(t_bake, 1)}, peak_rss_gb=rss,
+                           extra=extra)
         print(f"Receipt: {rp}")
     print(f"\nTotal time: {time.time() - t0:.1f}s generation + baking")
 

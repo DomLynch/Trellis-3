@@ -346,6 +346,56 @@ def patch_mesh_base_cpu_ops():
     write_file(path, src)
 
 
+def install_voxel_lookup():
+    """Copy the vectorised coordinate lookup next to its two users."""
+    src = os.path.join(BACKENDS_DIR, "voxel_lookup.py")
+    stubs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "stubs")
+    os.makedirs(stubs_dir, exist_ok=True)
+    for dst in (os.path.join(stubs_dir, "t3_voxel_lookup.py"),
+                os.path.join(TRELLIS_ROOT, "trellis2/modules/sparse/conv/t3_voxel_lookup.py")):
+        shutil.copy2(src, dst)
+    print("  Installed: stubs/t3_voxel_lookup.py, trellis2/modules/sparse/conv/t3_voxel_lookup.py")
+
+
+def install_attention_helper():
+    src = os.path.join(BACKENDS_DIR, "attention_mps.py")
+    dst = os.path.join(TRELLIS_ROOT, "trellis2/modules/sparse/attention/t3_sdpa.py")
+    shutil.copy2(src, dst)
+    print("  Installed: trellis2/modules/sparse/attention/t3_sdpa.py")
+
+
+_SDPA_OLD_START = "        H = q.shape[-2]\n        max_q = max(q_seqlen)\n"
+_SDPA_OLD_END = "        out = torch.cat(out_list, dim=0)\n"
+_SDPA_NEW = (
+    "        # Trellis-3: zero-copy when sequences are uniform (B=1), and optional\n"
+    "        # query chunking (ATTN_CHUNK env) to bound attention memory.\n"
+    "        from .t3_sdpa import pad_uniform, sdpa_chunked, unpad\n"
+    "        q_padded, k_padded, v_padded = pad_uniform(q, k, v, q_seqlen, kv_seqlen)\n"
+    "        out_padded = sdpa_chunked(sdpa_fn, q_padded, k_padded, v_padded)\n"
+    "        out = unpad(out_padded, q_seqlen)\n"
+)
+
+
+def patch_sparse_attention_t3():
+    """Swap the SDPA padding loop + single call for the t3_sdpa helpers.
+
+    Runs after patch_sparse_attention(), so it sees the block that one
+    inserted (fresh installs) or the identical block already present in an
+    existing trellis-mac install. Idempotent.
+    """
+    path = os.path.join(TRELLIS_ROOT, "trellis2/modules/sparse/attention/full_attn.py")
+    src = read_file(path)
+    if "t3_sdpa" in src:
+        print(f"  Already patched: {os.path.relpath(path, TRELLIS_ROOT)}")
+        return
+    a = src.find(_SDPA_OLD_START)
+    b = src.find(_SDPA_OLD_END, a)
+    if a < 0 or b < 0:
+        raise RuntimeError(f"could not locate the SDPA padding block in {path}")
+    src = src[:a] + _SDPA_NEW + src[b + len(_SDPA_OLD_END):]
+    write_file(path, src)
+
+
 def install_mesh_cleanup():
     """Copy the CPU mesh ops module next to Mesh so base.py can import it."""
     src = os.path.join(BACKENDS_DIR, "mesh_cleanup.py")
@@ -492,6 +542,9 @@ def main():
 
     patch_sparse_config()
     patch_sparse_attention()
+    install_attention_helper()
+    patch_sparse_attention_t3()
+    install_voxel_lookup()
     patch_image_feature_extractor()
     patch_birefnet()
     patch_mesh_base()

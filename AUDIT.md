@@ -62,6 +62,38 @@ graph traversal; expect seconds, not minutes).
 
 81 tests, 3.6 s.
 
+### Batch 4 — 1024 memory: attention, lookups, profiler
+
+What the code actually does at 1024 (read from upstream, not guessed):
+the SLat flow model is `attn_mode='full'` — every block attends over all
+tokens (up to `max_num_tokens`=49152), 12 heads × 128, 30 blocks, bf16.
+CFG runs cond and uncond **sequentially**, not batched. The decoder's
+`low_vram` flag is set by the pipeline but consumed nowhere. The mesh
+extraction and naive sparse conv built Python dicts of tuples with
+per-element `.item()` loops.
+
+| Item | How | Result |
+|---|---|---|
+| `pad_uniform` equals upstream loop padding (uniform and ragged); uniform case is a view, not a copy | `tests/test_attention_mps.py` | pass |
+| `sdpa_chunked` equals full SDPA for chunk ∈ {1, 7, 49, 50, 500}; env parsing; end-to-end pad→chunk→unpad equals plain attention | same | pass (1e-6) |
+| Attention patch applies to the upstream-inserted block (existing installs) and fresh installs; idempotent; compiles | `tests/test_patch.py` | pass |
+| `CoordIndex` equals a dict oracle on random coords incl. misses, 4-D batch coords, out-of-range, empty | `tests/test_voxel_lookup.py` | pass |
+| Vectorised mesh extraction produces the same quad set as the dict version; split-weight path; empty case | `tests/test_mesh_extract.py` | pass |
+| Vectorised neighbour map equals a brute-force oracle for 3³ / dilated / anisotropic kernels and two batch items | `tests/test_conv_none.py` | pass |
+| Profiler attributes peaks to stages; stage hooks mark it | `tests/test_profile.py` | pass |
+| Full patch script on a clean TRELLIS.2 copy, twice; every patched/installed file compiles; flat-module import of the new mesh extraction works | manual | pass |
+| Lookup benchmark, 1024-scale shell (3.57M voxels, 14.3M queries) | manual | **2.3 s** vectorised vs ~9 s for a `tolist()` dict (upstream used `.item()` per element — several × slower again) and ~1–2 GB of transient Python objects |
+
+100 tests, 8.4 s.
+
+Honest expectation for 1024: the certain wins are the lookups (time and
+1–2 GB transient) and the padded-copy removal (~0.6 GB at 49K tokens).
+Whether `--attn-chunk` saves anything depends on PyTorch's MPS SDPA kernel:
+if it already streams over keys, chunking is neutral; if it materialises
+[H, L, S], chunking is the difference between fitting and not. That is
+exactly what `--profile-memory` is for — the `sample_shape_slat_cascade`
+row will show it. Nothing here was run on MPS.
+
 ### First Mac measurements (reported by the Mac tester, 31 Oct 2026)
 
 - Peak memory 14.4 GB vs 20.6 GB upstream, same method (−30%). Confirms the

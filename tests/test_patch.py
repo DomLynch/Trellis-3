@@ -126,3 +126,51 @@ def test_patch_fails_loudly_if_method_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(pc, "TRELLIS_ROOT", str(root))
     with pytest.raises(RuntimeError, match="remove_faces"):
         pc.patch_mesh_base_cpu_ops()
+
+
+FAKE_FULL_ATTN = '''import torch
+from .. import config
+
+def sparse_scaled_dot_product_attention(*args, **kwargs):
+    q = k = v = None
+    q_seqlen = kv_seqlen = None
+    device = None
+    qkv = kv = None
+    num_all_args = 1
+    if config.ATTN == 'xformers':
+        out = None
+    else:
+        raise ValueError(f"Unknown attention module: {config.ATTN}")
+    return out
+'''
+
+
+def test_attention_patch_fresh_and_existing(tmp_path, monkeypatch):
+    root = tmp_path / "TRELLIS.2"
+    attn = root / "trellis2/modules/sparse/attention"
+    attn.mkdir(parents=True)
+    (attn / "full_attn.py").write_text(FAKE_FULL_ATTN)
+    monkeypatch.setattr(pc, "TRELLIS_ROOT", str(root))
+    pc.patch_sparse_attention()            # upstream block (as on an existing install)
+    src = (attn / "full_attn.py").read_text()
+    assert "q_padded = torch.zeros(B, max_q, H, C_q" in src
+    pc.install_attention_helper()
+    pc.patch_sparse_attention_t3()
+    src = (attn / "full_attn.py").read_text()
+    assert "q_padded = torch.zeros" not in src
+    assert "from .t3_sdpa import pad_uniform, sdpa_chunked, unpad" in src
+    assert "out = unpad(out_padded, q_seqlen)" in src
+    assert (attn / "t3_sdpa.py").exists()
+    compile(src, "full_attn.py", "exec")
+    before = src
+    pc.patch_sparse_attention_t3()         # idempotent
+    assert (attn / "full_attn.py").read_text() == before
+
+
+def test_voxel_lookup_install(tmp_path, monkeypatch):
+    root = tmp_path / "TRELLIS.2"
+    (root / "trellis2/modules/sparse/conv").mkdir(parents=True)
+    monkeypatch.setattr(pc, "TRELLIS_ROOT", str(root))
+    # stubs dir lives next to the patches/ folder in the real repo; redirect via chdir-free path hack
+    pc.install_voxel_lookup()
+    assert (root / "trellis2/modules/sparse/conv/t3_voxel_lookup.py").exists()
