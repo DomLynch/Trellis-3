@@ -26,6 +26,7 @@ from trellis3.runner import bootstrap
 bootstrap()  # must precede any torch import
 
 import argparse
+import itertools
 import json
 import os
 import queue
@@ -77,6 +78,7 @@ class JobServer:
         self._runner_factory = runner_factory
         self._runner = None
         self._lock = threading.Lock()
+        self._ids = itertools.count(1)
 
     @property
     def runner(self):
@@ -86,7 +88,7 @@ class JobServer:
             return self._runner
 
     def submit(self, job):
-        job_id = f"{int(time.time()*1000)}-{self.jobs_done + self.queue.qsize()}"
+        job_id = f"{int(time.time())}-{next(self._ids)}"
         self.results[job_id] = {"status": "queued", "job": job}
         self.queue.put((job_id, job))
         return job_id
