@@ -12,8 +12,18 @@ class _Sparse:
     def __init__(self, feats, coords):
         self.feats, self.coords = feats, coords
 
+    @property
+    def device(self):
+        return self.feats.device
+
     def replace(self, feats):
         return _Sparse(feats, self.coords)
+
+    def __mul__(self, other):
+        return _Sparse(self.feats * other, self.coords)
+
+    def __add__(self, other):
+        return _Sparse(self.feats + other, self.coords)
 
 
 class _Sampler:
@@ -25,17 +35,49 @@ class _Sampler:
         return None
 
 
+class _Model:
+    in_channels = 32
+
+    def __init__(self, name):
+        self.name = name
+        self.where = "cpu"
+        self.low_vram = False
+
+    def to(self, d):
+        self.where = str(d)
+
+    def cpu(self):
+        self.where = "cpu"
+
+    def upsample(self, slat, upsample_times):
+        # 16x finer coords than the input, batch column preserved
+        base = slat.coords.repeat_interleave(4, dim=0).clone()
+        base[:, 1:] = base[:, 1:] * 16 + torch.randint(0, 16, (base.shape[0], 3), dtype=base.dtype)
+        return base
+
+
+class _ShapeSampler(_Sampler):
+    def sample(self, model, noise, cond=None, steps=None, verbose=False, tqdm_desc="", **kw):
+        self.sample_once()          # one "step", so the memory guard sees it
+        self.passes = getattr(self, "passes", 0) + 1
+        self.last = {"model": model.name, "cond": cond, "steps": steps, "n": noise.feats.shape[0], "desc": tqdm_desc}
+        return types.SimpleNamespace(samples=_Sparse(torch.randn(noise.feats.shape[0], 32), noise.coords))
+
+
 class _Pipe:
     """Records every stage call with its arguments."""
 
     def __init__(self, ptype):
         from trellis3 import memory
-        self.models = {n: object() for n in memory.models_for([ptype])}
+        self.models = {n: _Model(n) for n in memory.models_for([ptype])}
         self.device = "cpu"
+        self.low_vram = True
+        self.shape_slat_sampler_params = {"steps": 12, "guidance_strength": 7.5}
+        self.shape_slat_normalization = {"mean": [0.0] * 32, "std": [1.0] * 32}
         self.image_cond_model = object()
         self.rembg_model = object()
         self.sparse_structure_sampler = _Sampler()
-        self.shape_slat_sampler = _Sampler()
+        self.shape_slat_sampler = _ShapeSampler()
         self.tex_slat_sampler = _Sampler()
         self.calls = []
         self.fail_at = None
@@ -56,19 +98,17 @@ class _Pipe:
         if self.fail_at == "coords":
             raise stages.MemoryPressure("boom")
         self._step(self.sparse_structure_sampler)
-        return torch.randint(0, 32, (100, 4), dtype=torch.int32)
+        c = torch.randint(0, 32, (100, 4), dtype=torch.int32)
+        c[:, 0] = 0
+        return c
 
     def sample_shape_slat(self, cond, model, coords, params):
         self.calls.append(("shape", cond["cond"], params))
         self._step(self.shape_slat_sampler)
         return _Sparse(torch.randn(100, 32), coords)
 
-    def sample_shape_slat_cascade(self, lr_cond, cond, m_lr, m, lr_res, res, coords, params, max_tokens):
-        self.calls.append(("shape_cascade", lr_cond["cond"], cond["cond"], lr_res, res, params, max_tokens))
-        if self.fail_at == "shape":
-            raise stages.MemoryPressure("boom")
-        self._step(self.shape_slat_sampler)
-        return _Sparse(torch.randn(300, 32), torch.randint(0, 64, (300, 4), dtype=torch.int32)), res
+    def sample_shape_slat_cascade(self, *a, **k):
+        raise AssertionError("upstream cascade must not be called; Trellis-3 splits it")
 
     def sample_tex_slat(self, cond, model, shape_slat, params):
         self.calls.append(("tex", cond["cond"], params, shape_slat.feats.shape[0]))
@@ -108,23 +148,54 @@ def test_512_order_matches_upstream_run(img):
                              "tex_slat_decoder", "shape_slat_flow_model_512", "tex_slat_flow_model_512"}  # nothing released
 
 
-def test_1024_cascade_args_and_release(img):
+def test_1024_cascade_split_into_three_saved_substages(img):
     p = _Pipe("1024_cascade")
+    seen = []
     log = []
-    st = stages.sample_stages(p, img, "1024_cascade", steps={"ss": 6, "tex": 8}, max_num_tokens=30000,
-                              release=True, log=log.append)
+    st = stages.sample_stages(p, img, "1024_cascade", steps={"ss": 6, "shape": 5, "tex": 8}, max_num_tokens=30000,
+                              release=True, on_stage=lambda n, s: seen.append((n, sorted(k for k in s if k.endswith("feats") or k.endswith("coords")))),
+                              log=log.append)
     kinds = [c[0] for c in p.calls]
-    assert kinds == ["preprocess", "cond", "cond", "ss", "shape_cascade", "tex"]
-    assert [c[1] for c in p.calls if c[0] == "cond"] == [512, 1024]
-    ss = p.calls[3]; sc = p.calls[4]; tx = p.calls[5]
-    assert ss[1] == 512 and ss[2] == 32 and ss[3] == {"steps": 6}
-    assert sc[1:5] == (512, 1024, 512, 1024) and sc[5] == {} and sc[6] == 30000
-    assert tx[1] == 1024 and tx[2] == {"steps": 8} and tx[3] == 300
-    assert st["res"] == 1024
-    # everything but the decoders was released, in stage order
+    assert kinds == ["preprocess", "cond", "cond", "ss", "tex"]        # shape ran through the split path
+    assert [n for n, _ in seen] == ["coords", "shape_lr", "shape_up", "shape_hr", "shape", "tex"]
+    # 512 latents are on disk before the upsample, hr coords before the 1024 pass
+    assert "shape_lr_feats" in seen[1][1] and "shape_hr_coords" not in seen[1][1]
+    assert "shape_hr_coords" in seen[2][1] and "shape_feats" not in seen[2][1]
+    assert "shape_feats" in seen[3][1]
+    # the two sampling passes used the right model/cond/steps and 16x finer coords
+    assert p.shape_slat_sampler.passes == 2
+    last = p.shape_slat_sampler.last
+    assert last["model"] == "shape_slat_flow_model_1024" and last["cond"] == 1024 and last["steps"] == 5
+    assert last["n"] == st["shape_hr_coords"].shape[0] and st["res"] == 1024
+    assert st["shape_hr_coords"][:, 1:].max() < 64                   # quantised to res//16
+    # release order: 512 flow dropped right after shape_lr, 1024 after shape_hr
+    i_lr = next(i for i, l in enumerate(log) if "shape_slat_flow_model_512" in l)
+    i_up = next(i for i, l in enumerate(log) if "stage shape_up" in l)
+    assert i_lr < i_up
     assert set(p.models) == {"shape_slat_decoder", "tex_slat_decoder"}
-    assert p.image_cond_model is None and p.rembg_model is None
-    assert any("sparse_structure_flow_model" in l for l in log)
+    assert p.models["shape_slat_decoder"].where == "cpu" and p.models["shape_slat_decoder"].low_vram is False
+
+
+def test_1024_cascade_resumes_after_lr(img):
+    p = _Pipe("1024_cascade")
+    st = stages.sample_stages(p, img, "1024_cascade", log=lambda *_: None)
+    partial = {k: v for k, v in st.items() if k not in ("shape_hr_coords", "shape_feats", "shape_coords", "tex_feats", "res")}
+    partial["done"] = ["coords", "shape_lr"]
+    p2 = _Pipe("1024_cascade")
+    st2 = stages.sample_stages(p2, img, "1024_cascade", state=partial, log=lambda *_: None)
+    assert p2.shape_slat_sampler.passes == 1                     # only the 1024 pass re-ran
+    assert p2.shape_slat_sampler.last["cond"] == 1024
+    assert st2["done"] == ["coords", "shape_lr", "shape_up", "shape_hr", "shape", "tex"]
+    assert torch.equal(st2["shape_lr_feats"], st["shape_lr_feats"])
+
+
+def test_token_budget_reduces_resolution(img):
+    p = _Pipe("1024_cascade")
+    st = stages.sample_stages(p, img, "1024_cascade", max_num_tokens=10, log=lambda *_: None)
+    assert st["res"] == 1024                                     # floor: never below 1024
+    p = _Pipe("1536_cascade")
+    st = stages.sample_stages(p, img, "1536_cascade", max_num_tokens=10, log=lambda *_: None)
+    assert st["res"] == 1024                                     # stepped down from 1536 by 128s
 
 
 def test_resume_skips_done_stages_and_restores_rng(img):
@@ -144,13 +215,13 @@ def test_resume_skips_done_stages_and_restores_rng(img):
 
 def test_memory_pressure_stops_and_keeps_completed_stages(img):
     p = _Pipe("1024_cascade")
-    p.fail_at = "shape"
     saved = []
+    free = iter([50.0, 50.0, 0.5])       # ss step ok, 512 pass ok, 1024 pass trips
     with pytest.raises(stages.MemoryPressure):
-        stages.sample_stages(p, img, "1024_cascade", on_stage=lambda n, s: saved.append((n, dict(s))),
-                             log=lambda *_: None)
-    assert [n for n, _ in saved] == ["coords"]
-    assert "coords" in saved[0][1] and saved[0][1]["done"] == ["coords"]
+        stages.sample_stages(p, img, "1024_cascade", min_free_gb=2.0, probe=lambda: next(free, 0.5),
+                             on_stage=lambda n, s: saved.append((n, dict(s))), log=lambda *_: None)
+    assert [n for n, _ in saved] == ["coords", "shape_lr", "shape_up"]
+    assert "shape_hr_coords" in saved[-1][1] and saved[-1][1]["done"] == ["coords", "shape_lr", "shape_up"]
 
 
 def test_guard_trips_between_steps(img):

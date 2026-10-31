@@ -191,6 +191,8 @@ def main(argv=None):
 
     if args.attn_chunk:
         os.environ["ATTN_CHUNK"] = str(args.attn_chunk)
+        print(f"attn_chunk={args.attn_chunk}: NOTE this can push PyTorch's MPS attention off its fused kernel "
+              "onto the math path (materialises H x chunk x S scores). Use only if the unchunked run OOMs in attention.")
     profiler = None
     if args.profile_memory:
         from trellis3.profile import Profiler, activate

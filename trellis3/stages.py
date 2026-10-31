@@ -20,6 +20,8 @@ import gc
 import io
 import time
 
+from trellis3 import profile as _profile
+
 STAGES = ("coords", "shape", "tex")
 
 _SS_RES = {"512": 32, "1024": 64, "1024_cascade": 32, "1536_cascade": 32}
@@ -190,6 +192,7 @@ def sample_stages(pipeline, image, pipeline_type, seed=42, steps=None, max_num_t
         # --- coords ------------------------------------------------------------
         if "coords" not in done:
             t0 = time.time()
+            _profile.mark("coords")
             coords = pipeline.sample_sparse_structure(cond_512, _SS_RES[pipeline_type], 1,
                                                       _steps_for(steps, "coords"))
             state["coords"] = coords
@@ -200,28 +203,60 @@ def sample_stages(pipeline, image, pipeline_type, seed=42, steps=None, max_num_t
             _release(pipeline, _NEEDS["coords"], log)
 
         # --- shape -------------------------------------------------------------
-        if "shape" not in done:
-            t0 = time.time()
-            sp = _steps_for(steps, "shape")
-            if pipeline_type == "512":
-                shape_slat = pipeline.sample_shape_slat(cond_512, pipeline.models["shape_slat_flow_model_512"],
-                                                        coords, sp)
-                res = 512
-            elif pipeline_type == "1024":
-                shape_slat = pipeline.sample_shape_slat(cond_1024, pipeline.models["shape_slat_flow_model_1024"],
-                                                        coords, sp)
-                res = 1024
-            else:
-                target = 1024 if pipeline_type == "1024_cascade" else 1536
-                shape_slat, res = pipeline.sample_shape_slat_cascade(
-                    cond_512, cond_1024,
-                    pipeline.models["shape_slat_flow_model_512"], pipeline.models["shape_slat_flow_model_1024"],
-                    512, target, coords, sp, max_num_tokens)
-            state["shape_feats"] = shape_slat.feats
-            state["shape_coords"] = shape_slat.coords
-            state["res"] = int(res)
-            log(f"  stage shape: {shape_slat.feats.shape[0]:,} tokens at {res} ({time.time() - t0:.0f}s)")
-            finish("shape")
+        sp = _steps_for(steps, "shape")
+        if pipeline_type in ("512", "1024"):
+            if "shape" not in done:
+                t0 = time.time()
+                _profile.mark("shape")
+                if pipeline_type == "512":
+                    shape_slat = pipeline.sample_shape_slat(cond_512, pipeline.models["shape_slat_flow_model_512"],
+                                                            coords, sp)
+                    res = 512
+                else:
+                    shape_slat = pipeline.sample_shape_slat(cond_1024, pipeline.models["shape_slat_flow_model_1024"],
+                                                            coords, sp)
+                    res = 1024
+                state["shape_feats"] = shape_slat.feats
+                state["shape_coords"] = shape_slat.coords
+                state["res"] = int(res)
+                log(f"  stage shape: {shape_slat.feats.shape[0]:,} tokens at {res} ({time.time() - t0:.0f}s)")
+                finish("shape")
+        else:
+            # The cascade is three separate things upstream runs in one call:
+            # a 512 sampling pass, the shape decoder upsampling it to the
+            # high-res grid, and a 1024/1536 sampling pass. Each is its own
+            # sub-stage here so the latents survive a crash in the next one
+            # and the profiler can tell them apart.
+            target = 1024 if pipeline_type == "1024_cascade" else 1536
+            if "shape_lr" not in done:
+                t0 = time.time()
+                _profile.mark("shape_lr")
+                slat = _sample_slat(pipeline, pipeline.models["shape_slat_flow_model_512"], cond_512, coords, sp,
+                                    "Sampling shape SLat (512)")
+                state["shape_lr_feats"], state["shape_lr_coords"] = slat.feats, slat.coords
+                log(f"  stage shape_lr: {slat.feats.shape[0]:,} tokens at 512 ({time.time() - t0:.0f}s)")
+                finish("shape_lr")
+            if release:
+                _release(pipeline, ["shape_slat_flow_model_512"], log)
+
+            if "shape_up" not in done:
+                t0 = time.time()
+                _profile.mark("shape_up")
+                slat = _make_sparse(state["shape_lr_feats"], state["shape_lr_coords"], pipeline.device)
+                hr_coords, res = _upsample_coords(pipeline, slat, 512, target, max_num_tokens)
+                state["shape_hr_coords"], state["res"] = hr_coords, int(res)
+                log(f"  stage shape_up: {hr_coords.shape[0]:,} tokens at {res} ({time.time() - t0:.0f}s)")
+                finish("shape_up")
+
+            if "shape_hr" not in done:
+                t0 = time.time()
+                _profile.mark("shape_hr")
+                slat = _sample_slat(pipeline, pipeline.models["shape_slat_flow_model_1024"], cond_1024,
+                                    state["shape_hr_coords"], sp, f"Sampling shape SLat ({state['res']})")
+                state["shape_feats"], state["shape_coords"] = slat.feats, slat.coords
+                log(f"  stage shape_hr: {slat.feats.shape[0]:,} tokens at {state['res']} ({time.time() - t0:.0f}s)")
+                finish("shape_hr")
+                finish("shape")
         if release:
             keep = set(_NEEDS["tex"][pipeline_type]) | {"shape_slat_decoder", "tex_slat_decoder"}
             _release(pipeline, [n for n in _NEEDS["shape"][pipeline_type] if n not in keep], log)
@@ -229,6 +264,7 @@ def sample_stages(pipeline, image, pipeline_type, seed=42, steps=None, max_num_t
         # --- tex ---------------------------------------------------------------
         if "tex" not in done:
             t0 = time.time()
+            _profile.mark("tex")
             shape_slat = _make_sparse(state["shape_feats"], state["shape_coords"], pipeline.device)
             cond = cond_512 if pipeline_type == "512" else cond_1024
             name = _NEEDS["tex"][pipeline_type][0]
@@ -239,6 +275,50 @@ def sample_stages(pipeline, image, pipeline_type, seed=42, steps=None, max_num_t
         if release:
             _release(pipeline, _NEEDS["tex"][pipeline_type], log)
     return state
+
+
+def _sample_slat(pipeline, flow_model, cond, coords, sampler_params, desc):
+    """One shape-SLat sampling pass, exactly as upstream sample_shape_slat."""
+    import torch
+    from trellis2.modules.sparse import SparseTensor
+    noise = SparseTensor(
+        feats=torch.randn(coords.shape[0], flow_model.in_channels).to(pipeline.device),
+        coords=coords.to(pipeline.device),
+    )
+    params = {**pipeline.shape_slat_sampler_params, **sampler_params}
+    if pipeline.low_vram:
+        flow_model.to(pipeline.device)
+    slat = pipeline.shape_slat_sampler.sample(flow_model, noise, **cond, **params,
+                                              verbose=True, tqdm_desc=desc).samples
+    if pipeline.low_vram:
+        flow_model.cpu()
+    std = torch.tensor(pipeline.shape_slat_normalization["std"])[None].to(slat.device)
+    mean = torch.tensor(pipeline.shape_slat_normalization["mean"])[None].to(slat.device)
+    return slat * std + mean
+
+
+def _upsample_coords(pipeline, slat, lr_resolution, resolution, max_num_tokens):
+    """Shape-decoder upsample + token-budget quantisation, as upstream cascade."""
+    import torch
+    dec = pipeline.models["shape_slat_decoder"]
+    if pipeline.low_vram:
+        dec.to(pipeline.device)
+        dec.low_vram = True
+    hr_coords = dec.upsample(slat, upsample_times=4)
+    if pipeline.low_vram:
+        dec.cpu()
+        dec.low_vram = False
+    hr_resolution = resolution
+    while True:
+        quant = torch.cat([hr_coords[:, :1],
+                           ((hr_coords[:, 1:] + 0.5) / lr_resolution * (hr_resolution // 16)).int()], dim=1)
+        coords = quant.unique(dim=0)
+        if coords.shape[0] < max_num_tokens or hr_resolution == 1024:
+            if hr_resolution != resolution:
+                print(f"Due to the limited number of tokens, the resolution is reduced to {hr_resolution}.")
+            break
+        hr_resolution -= 128
+    return coords, hr_resolution
 
 
 def _make_sparse(feats, coords, device):

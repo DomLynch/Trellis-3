@@ -115,6 +115,38 @@ verbatim, so it should), that `torch.mps.get/set_rng_state` round-trips, and
 the actual memory headroom a decode-only child process has (expected ~20 GB
 free on a 24 GB machine instead of ~8).
 
+### Batch 6 — cascade split (from the Mac tester's crash analysis)
+
+The 1024 run that was killed died *inside* the shape stage: after the 512
+pass (44 s) and before the stage ended, so nothing of it was saved. The
+cascade stage is now three sub-stages mirroring the upstream code line by
+line (`_sample_slat`, `_upsample_coords` in `trellis3/stages.py`).
+
+| Item | How | Result |
+|---|---|---|
+| Sub-stage order, saves and contents: `shape_lr` (512 latents), `shape_up` (hr coords + res), `shape_hr` (1024 latents); 1024 pass uses the 1024 model/cond/steps on the quantised coords | `tests/test_stages.py` | pass |
+| Resume after `shape_lr` re-runs only the 1024 pass | same | pass |
+| Token budget steps resolution down by 128 with a 1024 floor (upstream loop) | same | pass |
+| 512 flow model released right after `shape_lr`; decoder shuttled back to CPU with `low_vram` reset | same | pass |
+| Memory guard inside the cascade keeps `coords`, `shape_lr`, `shape_up` | same | pass |
+
+120 tests.
+
+**Where the kill most likely happened, and why chunking the upsample is not
+the first move.** The upsample input is the 512 SLat (a few thousand tokens
+on the 32³ structure grid); its output is just coordinates at 512 res
+(~1M). Its activations at the finest level are N×64 fp16 — hundreds of MB,
+not tens of GB. The thing that starts immediately after it is the **1024
+sampling pass over up to 49K tokens with full attention**. Two facts from
+that run: it had `--attn-chunk 4096` on, and the *previous* day's 1024 run
+(upstream SDPA, no chunking) got through all of sampling. Chunking slices
+Q so L≠S, which on MPS can drop SDPA from its fused kernel to the math
+path that materialises `[12, 4096, 49152]` fp32 ≈ 9.6 GB per chunk plus
+softmax temporaries — enough to collapse free memory right after the 512
+pass. So the first retry is **without `--attn-chunk`**; the sub-stage
+profile rows then say whether `shape_up` or `shape_hr` owns the peak. The
+upsample gets chunked only if its row is the one that is high.
+
 ### First Mac measurements (reported by the Mac tester, 31 Oct 2026)
 
 - Peak memory 14.4 GB vs 20.6 GB upstream, same method (−30%). Confirms the

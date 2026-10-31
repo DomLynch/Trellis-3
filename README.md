@@ -31,6 +31,7 @@ released, how jobs are run, and what happens to the mesh after decoding.
 | Run receipt | — | `<output>.receipt.json`: settings, input hash/size, output hashes, timings, peak RSS, versions |
 | Server memory guard | — | `serve.py --min-free-gb N` waits for free RAM before each job, fails the job after `--mem-wait` |
 | Full-res detail in the bake | mtlbvh can't take the 800K-face decoder mesh, so the bake only ever sees the 200K simplified copy | CPU nearest-surface index on the full mesh: texels snap onto it before colour sampling (KDTree path) and `--normal-map` bakes a tangent-space normal map from it (both paths) |
+| Cascade shape stage | one upstream call: 512 pass → decoder upsample → 1024 pass; nothing saved until all three finish | three sub-stages (`shape_lr`, `shape_up`, `shape_hr`), each saved to the latents file and each its own profiler row; `--resume` restarts at the one that died |
 | Sampling vs decode | one `pipeline.run()` call: a decode crash loses 20 min of sampling, and the five flow models are still resident when the decoder starts | staged sampling with latents saved after every stage (`<output>.latents.pt`); each model dropped after its stage; `--two-stage` decodes in a fresh child process that loads only the two decoders (~1.9 GB); `--from-latents` / `--resume` |
 | Memory guard | killed from outside, output lost | `--min-free-gb N` checks free RAM before every sampler step and exits cleanly (code 3) with the finished stages on disk |
 | Steps | one `--steps` for all stages | `--ss-steps / --shape-steps / --tex-steps` (the texture stage is the slow one at 1024) |
@@ -125,7 +126,8 @@ The latents file (tens of MB) can also be decoded on another machine.
 --resident                keep models on MPS instead of CPU shuttling (opt-in, unmeasured)
 --no-stage-hooks          don't flush the MPS cache between stages
 --no-thermal-guard        don't wait for the CPU to cool
---attn-chunk N            query-chunked full attention (try 4096 at 1024/1536); exact, memory-bounded
+--attn-chunk N            query-chunked full attention; exact. CAUTION: can force MPS off its fused kernel and use
+                          MORE memory — only if the unchunked run OOMs inside a sampling pass
 --profile-memory          per-stage memory table (RSS, MPS driver, MPS allocator) + receipt entry
 --metallic-factor F       pin glTF metallicFactor (default 0.0; -1 keeps upstream's 1.0)
 --gamma auto|G|0          base-colour gamma: auto matches the photo (default, ≈1.6–1.7 on heads), a number, or 0 for none
