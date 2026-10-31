@@ -296,6 +296,64 @@ def patch_mesh_base():
     write_file(path, src)
 
 
+_CPU_OPS = {
+    "fill_holes": (
+        "    def fill_holes(self, max_hole_perimeter=3e-2):\n"
+        "        # Trellis-3: CPU hole filling (Metal cumesh segfaults on decode meshes)\n"
+        "        from .cleanup_cpu import fill_holes_tensor\n"
+        "        self.vertices, self.faces = fill_holes_tensor(self.vertices, self.faces, max_hole_perimeter)\n"
+    ),
+    "remove_faces": (
+        "    def remove_faces(self, face_mask: torch.Tensor):\n"
+        "        # Trellis-3: CPU face removal\n"
+        "        from .cleanup_cpu import remove_faces_tensor\n"
+        "        self.vertices, self.faces = remove_faces_tensor(self.vertices, self.faces, face_mask)\n"
+    ),
+    "simplify": (
+        "    def simplify(self, target=1000000, verbose: bool=False, options: dict={}):\n"
+        "        # Trellis-3: CPU quadric decimation via fast_simplification\n"
+        "        from .cleanup_cpu import simplify_tensor\n"
+        "        self.vertices, self.faces = simplify_tensor(self.vertices, self.faces, target)\n"
+    ),
+}
+
+
+def patch_mesh_base_cpu_ops():
+    """Replace the three stubbed-out mesh ops with CPU implementations.
+
+    Runs after patch_mesh_base(), so it sees either upstream's `return` stubs
+    (existing installs) or, if patch_mesh_base was skipped, the original
+    cumesh bodies. Either way each method body is replaced wholesale.
+    Requires install_mesh_cleanup() to have copied cleanup_cpu.py next to base.py.
+    """
+    import re
+    path = os.path.join(TRELLIS_ROOT, "trellis2/representations/mesh/base.py")
+    src = read_file(path)
+
+    if "cleanup_cpu" in src:
+        print(f"  Already patched: {os.path.relpath(path, TRELLIS_ROOT)}")
+        return
+
+    for name, replacement in _CPU_OPS.items():
+        # Method header through to the next method/class at the same or outer level.
+        pattern = re.compile(
+            rf"    def {name}\(self[^\n]*\):\n(?:.*?\n)*?(?=    def |\nclass |\Z)",
+        )
+        src, n = pattern.subn(replacement + "\n", src, count=1)
+        if n != 1:
+            raise RuntimeError(f"could not locate Mesh.{name} in {path}")
+
+    write_file(path, src)
+
+
+def install_mesh_cleanup():
+    """Copy the CPU mesh ops module next to Mesh so base.py can import it."""
+    src = os.path.join(BACKENDS_DIR, "mesh_cleanup.py")
+    dst = os.path.join(TRELLIS_ROOT, "trellis2/representations/mesh/cleanup_cpu.py")
+    shutil.copy2(src, dst)
+    print(f"  Installed: trellis2/representations/mesh/cleanup_cpu.py")
+
+
 def patch_fdg_vae():
     """Force our pure-Python flexible_dual_grid_to_mesh over any installed
     o_voxel. The Metal-port o_voxel.convert segfaults on decoder output even
@@ -437,6 +495,8 @@ def main():
     patch_image_feature_extractor()
     patch_birefnet()
     patch_mesh_base()
+    install_mesh_cleanup()
+    patch_mesh_base_cpu_ops()
     patch_fdg_vae()
     patch_pipeline()
     patch_pipeline_base()

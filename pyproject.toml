@@ -1,7 +1,7 @@
 [project]
-name = "trellis-apple"
+name = "trellis-3"
 version = "0.1.0"
-description = "TRELLIS.2 image-to-3D generation for Apple Silicon"
+description = "TRELLIS.2 on Apple Silicon: lower memory, resident server, CPU hole filling"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 

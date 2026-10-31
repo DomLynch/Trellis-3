@@ -134,3 +134,8 @@ echo
 echo "=== Setup complete ==="
 echo "Activate the environment:  source .venv/bin/activate"
 echo "Generate a 3D model:       python generate.py path/to/image.png"
+
+# Trellis-3: report which Metal components are actually active. Without
+# mtlgemm the baker falls back to a path that leaves ring artifacts.
+echo
+python3 tools/check_metal.py || true
