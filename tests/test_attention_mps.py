@@ -67,3 +67,45 @@ def test_end_to_end_equals_unpadded_attention():
     ref = F.scaled_dot_product_attention(q.permute(1, 0, 2)[None], k.permute(1, 0, 2)[None],
                                          v.permute(1, 0, 2)[None])[0].permute(1, 0, 2)
     assert torch.allclose(out, ref, atol=1e-6)
+
+
+def test_sdpa_tiled_is_exact_for_awkward_sizes():
+    g = torch.Generator().manual_seed(4)
+    for (L, S, qt, kt) in ((50, 50, 7, 11), (33, 70, 33, 70), (1, 9, 4, 4), (64, 17, 16, 5), (100, 100, 1000, 1000)):
+        q = torch.randn(2, 3, L, 16, generator=g); k = torch.randn(2, 3, S, 16, generator=g)
+        v = torch.randn(2, 3, S, 8, generator=g)
+        ref = F.scaled_dot_product_attention(q, k, v)
+        out = am.sdpa_tiled(q, k, v, qt, kt)
+        assert out.shape == ref.shape and out.dtype == ref.dtype
+        assert torch.allclose(out, ref, atol=1e-5), (L, S, qt, kt)
+
+
+def test_sdpa_tiled_bf16_inputs_and_large_logits():
+    g = torch.Generator().manual_seed(5)
+    q = (torch.randn(1, 2, 40, 32, generator=g) * 8).to(torch.bfloat16)   # big logits: tests the running max
+    k = (torch.randn(1, 2, 40, 32, generator=g) * 8).to(torch.bfloat16)
+    v = torch.randn(1, 2, 40, 32, generator=g).to(torch.bfloat16)
+    ref = F.scaled_dot_product_attention(q.float(), k.float(), v.float())
+    out = am.sdpa_tiled(q, k, v, 16, 16)
+    assert out.dtype == torch.bfloat16
+    assert torch.allclose(out.float(), ref, atol=3e-2)
+
+
+def test_dispatcher_prefers_tiles_over_chunk(monkeypatch):
+    g = torch.Generator().manual_seed(6)
+    q = torch.randn(1, 2, 30, 8, generator=g); k = torch.randn(1, 2, 30, 8, generator=g); v = torch.randn(1, 2, 30, 8, generator=g)
+    ref = F.scaled_dot_product_attention(q, k, v)
+    calls = []
+    def spy(a, b, c):
+        calls.append(a.shape[2]); return F.scaled_dot_product_attention(a, b, c)
+    monkeypatch.setenv("ATTN_TILE", "8,8"); monkeypatch.setenv("ATTN_CHUNK", "5")
+    assert am.tile_sizes() == (8, 8)
+    out = am.sdpa_chunked(spy, q, k, v)
+    assert torch.allclose(out, ref, atol=1e-5) and calls == []          # tiled path, sdpa_fn unused
+    monkeypatch.setenv("ATTN_TILE", "")
+    out = am.sdpa_chunked(spy, q, k, v)
+    assert torch.allclose(out, ref, atol=1e-6) and calls == [5] * 6       # chunked path
+    monkeypatch.setenv("ATTN_TILE", "junk")
+    assert am.tile_sizes() is None
+    monkeypatch.setenv("ATTN_TILE", "2048x4096")
+    assert am.tile_sizes() == (2048, 4096)

@@ -24,7 +24,7 @@ def _metal_bake_available():
         return False
     backend = getattr(o_voxel.postprocess, "_BACKEND", None)
     has_dr = getattr(o_voxel.postprocess, "_HAS_DR", False)
-    use_metal = backend == "metal" and has_dr
+    use_metal = backend in ("metal", "cuda") and has_dr
     if use_metal and not getattr(o_voxel.postprocess, "_HAS_FLEX_GEMM", False):
         _patch_grid_sample_fallback(o_voxel.postprocess)
     return use_metal

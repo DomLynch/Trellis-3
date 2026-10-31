@@ -70,8 +70,64 @@ def chunk_size():
         return 0
 
 
-def sdpa_chunked(sdpa_fn, q, k, v, chunk=None):
-    """scaled_dot_product_attention over query chunks. q/k/v: [B, H, L, C]."""
+def tile_sizes():
+    """ATTN_TILE='Lq,Sk' -> (Lq, Sk); unset/invalid -> None."""
+    raw = os.environ.get("ATTN_TILE", "")
+    if not raw:
+        return None
+    try:
+        a, b = (int(x) for x in raw.replace("x", ",").split(","))
+        return (a, b) if a > 0 and b > 0 else None
+    except ValueError:
+        return None
+
+
+def sdpa_tiled(q, k, v, q_tile=2048, k_tile=4096, scale=None):
+    """Exact attention with memory bounded to [B, H, q_tile, k_tile].
+
+    Flash-attention arithmetic in plain PyTorch: for each query tile, walk
+    the keys in tiles keeping a running max and running sum (online softmax)
+    in fp32, so the full [L, S] score matrix never exists. On MPS, where
+    scaled_dot_product_attention materialises that matrix for these shapes
+    (12 heads x 17.7K^2 x 4 B = 15 GB in the profiled 1024 run), this is the
+    difference between fitting in 24 GB and not. Slower than a fused kernel:
+    a Python loop of (L/q_tile) x (S/k_tile) small matmuls.
+    q/k/v: [B, H, L|S, C]. Returns [B, H, L, Cv] in q's dtype.
+    """
+    B, H, L, C = q.shape
+    S = k.shape[2]
+    Cv = v.shape[3]
+    scale = (C ** -0.5) if scale is None else scale
+    out = torch.empty(B, H, L, Cv, dtype=q.dtype, device=q.device)
+    for qs in range(0, L, q_tile):
+        qb = q[:, :, qs:qs + q_tile].float() * scale                     # [B,H,lq,C]
+        m = torch.full((B, H, qb.shape[2], 1), float("-inf"), device=q.device)
+        l = torch.zeros((B, H, qb.shape[2], 1), device=q.device)
+        acc = torch.zeros((B, H, qb.shape[2], Cv), device=q.device)
+        for ks in range(0, S, k_tile):
+            kb = k[:, :, ks:ks + k_tile].float()
+            vb = v[:, :, ks:ks + k_tile].float()
+            s = qb @ kb.transpose(-1, -2)                                # [B,H,lq,sk]
+            m_new = torch.maximum(m, s.amax(dim=-1, keepdim=True))
+            p = torch.exp(s - m_new)
+            alpha = torch.exp(m - m_new)
+            l = l * alpha + p.sum(dim=-1, keepdim=True)
+            acc = acc * alpha + p @ vb
+            m = m_new
+        out[:, :, qs:qs + q_tile] = (acc / l).to(q.dtype)
+    return out
+
+
+def sdpa_chunked(sdpa_fn, q, k, v, chunk=None, tiles=None):
+    """Attention dispatcher. q/k/v: [B, H, L|S, C].
+
+    ATTN_TILE=Lq,Sk  -> sdpa_tiled (bounded memory, exact, slower)
+    ATTN_CHUNK=N     -> sdpa_fn over query chunks (bounds one axis only)
+    otherwise        -> sdpa_fn as is
+    """
+    tiles = tile_sizes() if tiles is None else tiles
+    if tiles:
+        return sdpa_tiled(q, k, v, *tiles)
     chunk = chunk_size() if chunk is None else chunk
     L = q.shape[2]
     if chunk <= 0 or chunk >= L:

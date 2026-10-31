@@ -285,7 +285,11 @@ def main(argv=None):
     p.add_argument("--no-receipts", action="store_true", help="Do not write .receipt.json per output")
     p.add_argument("--attn-chunk", type=int, default=0,
                    help="Split full attention into query chunks of N rows (0 = off)")
+    p.add_argument("--attn-tile", default=None, metavar="LQ,SK",
+                   help="Exact tiled attention with bounded memory, e.g. 2048,4096")
     args = p.parse_args(argv)
+    if args.attn_tile:
+        os.environ["ATTN_TILE"] = args.attn_tile
     if args.attn_chunk:
         os.environ["ATTN_CHUNK"] = str(args.attn_chunk)
     if not args.watch and not args.http:

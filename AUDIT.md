@@ -147,6 +147,36 @@ pass. So the first retry is **without `--attn-chunk`**; the sub-stage
 profile rows then say whether `shape_up` or `shape_hr` owns the peak. The
 upsample gets chunked only if its row is the one that is high.
 
+### Batch 7 — tiled attention (from the profile run)
+
+Profile on `0fbf933`, master, head1, no `--attn-chunk`: `shape_lr` 51 s OK,
+`shape_up` 9 s OK (17,730 tokens at 1024), **killed in `shape_hr`** with
+free memory 54% → 14% in 20 s, swap 9.8 GB. That is the 1024 shape
+sampling pass. At 17,730 tokens the attention score matrix is
+12 × 17,730² × 4 B ≈ 15 GB, so PyTorch's MPS SDPA is materialising it on
+this path. My earlier `--attn-chunk` only bounded the query axis and was
+not the cause of the previous crash either (this run had it off).
+
+| Item | How | Result |
+|---|---|---|
+| `sdpa_tiled` equals `scaled_dot_product_attention` for sizes that don't divide the tiles, single-row queries, S<L, and tiles larger than the input | `tests/test_attention_mps.py` | pass (1e-5) |
+| bf16 inputs with large logits (running-max path), output dtype preserved | same | pass (3e-2, bf16 rounding) |
+| Dispatcher: `ATTN_TILE` wins over `ATTN_CHUNK`; env parsing incl. `2048x4096` | same | pass |
+| CPU timing, 12 × 8192 × 128 | manual | plain SDPA vs tiled — see commit message; exactness 1e-6 |
+| Bound | arithmetic | tile `2048,4096`: 12 × 2048 × 4096 × 4 B = 0.4 GB per tile, vs 15 GB |
+
+123 tests.
+
+Not verified on MPS: the speed. It is a Python loop of (L/2048) × (S/4096)
+matmuls per attention call — at 17.7K tokens 45 tiles × 30 blocks × 12
+steps × 2 (CFG) ≈ 32K small kernels for the shape pass. Expect it slower
+than the fused path would be, but it should run. If too slow, larger tiles
+(`4096,8192` → 1.6 GB) trade memory for fewer launches.
+
+`_metal_bake_available` now also accepts `_BACKEND == "cuda"`, so a latents
+file produced on the Mac can be decoded on a CUDA machine with the official
+bake.
+
 ### First Mac measurements (reported by the Mac tester, 31 Oct 2026)
 
 - Peak memory 14.4 GB vs 20.6 GB upstream, same method (−30%). Confirms the

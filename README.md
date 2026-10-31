@@ -36,6 +36,7 @@ released, how jobs are run, and what happens to the mesh after decoding.
 | Memory guard | killed from outside, output lost | `--min-free-gb N` checks free RAM before every sampler step and exits cleanly (code 3) with the finished stages on disk |
 | Steps | one `--steps` for all stages | `--ss-steps / --shape-steps / --tex-steps` (the texture stage is the slow one at 1024) |
 | Bake size | 200K faces hard-coded | `--bake-faces N`; `--preset master` = 1024, 4096 textures, 1M faces, normal map, two-stage |
+| 1024 attention on MPS | `scaled_dot_product_attention` materialises the full score matrix for these shapes: 12 × 17,730² × 4 B ≈ 15 GB — measured as the kill point of the 1024 shape pass on a 24 GB Mac | `--attn-tile 2048,4096`: exact tiled attention (online softmax, fp32 accumulators) with the score tile bounded to ~0.4 GB; slower, but it fits |
 | 1024 attention memory | one SDPA call over all ~49K tokens, plus a padded copy of Q/K/V even for a single sequence | `--attn-chunk N` splits queries into chunks (exact; bounds the score matrix to H×N×S); uniform batches are zero-copy views |
 | Coordinate lookups | Python dict of tuples + `.item()` loops in mesh extraction and the naive sparse conv (minutes and GBs at 1024) | sorted int64 keys + `searchsorted`: 3.6M voxels / 14M queries in 2.3 s |
 | Memory attribution | — | `--profile-memory`: per-stage peak RSS / MPS driver / MPS allocator, printed and stored in the receipt |
@@ -74,6 +75,9 @@ python generate.py photo.png --preset draft     # ~1 min geometry check
 python generate.py photo.png --preset final --output keeper
 ```
 
+**After every `git pull`:** re-run `python patches/mps_compat.py` — it re-copies
+the helper modules (attention, lookups, mesh ops) into the TRELLIS.2 tree.
+
 **Existing trellis-mac install?** Copy `backends/`, `patches/`, `trellis3/`,
 `generate.py`, `serve.py`, `tools/` over your checkout and run
 `python patches/mps_compat.py` again. The patch detects upstream's `return`
@@ -104,7 +108,8 @@ free RAM before starting a job instead of swapping. Every output gets a
 
 ```bash
 # master: 1024 shape, 4K textures, 1M-face bake, normal map; decode in a fresh process
-python generate.py head.png --preset master --output boss1_master --min-free-gb 3
+# --attn-tile is what makes the 1024 shape pass fit on a 24 GB Mac
+python generate.py head.png --preset master --output boss1_master --min-free-gb 3 --attn-tile 2048,4096
 # it died at decode? sampling is on disk — just decode again
 python generate.py head.png --from-latents boss1_master.latents.pt --preset master --output boss1_master
 # it died during sampling? finished stages are kept
@@ -126,6 +131,7 @@ The latents file (tens of MB) can also be decoded on another machine.
 --resident                keep models on MPS instead of CPU shuttling (opt-in, unmeasured)
 --no-stage-hooks          don't flush the MPS cache between stages
 --no-thermal-guard        don't wait for the CPU to cool
+--attn-tile LQ,SK         exact tiled attention, memory bounded (use 2048,4096 for 1024 on 24 GB)
 --attn-chunk N            query-chunked full attention; exact. CAUTION: can force MPS off its fused kernel and use
                           MORE memory — only if the unchunked run OOMs inside a sampling pass
 --profile-memory          per-stage memory table (RSS, MPS driver, MPS allocator) + receipt entry

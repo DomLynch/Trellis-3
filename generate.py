@@ -90,6 +90,8 @@ def build_parser():
                      help="Do not wait for CPU_Speed_Limit to recover before generating")
     run.add_argument("--attn-chunk", type=int, default=0,
                      help="Split full attention into query chunks of N rows (0 = off)")
+    run.add_argument("--attn-tile", default=None, metavar="LQ,SK",
+                     help="Exact tiled attention with bounded memory, e.g. 2048,4096. Use this for 1024 on a 24GB Mac")
     run.add_argument("--profile-memory", action="store_true",
                      help="Sample RSS/MPS memory per stage; print a table and store it in the receipt")
 
@@ -159,7 +161,7 @@ def _export_and_finish(args, cfg, mesh, t0, t_gen, profiler, extra_settings):
         extra["memory_profile"] = prof
     if not args.no_receipt:
         settings = {**cfg, "seed": args.seed, "max_num_tokens": args.max_tokens,
-                    "resident": args.resident, "attn_chunk": args.attn_chunk,
+                    "resident": args.resident, "attn_chunk": args.attn_chunk, "attn_tile": args.attn_tile,
                     "steps_per_stage": steps_spec(args, cfg), **bake_kwargs(args, cfg), **extra_settings}
         rp = write_receipt(args.output, settings, args.image, outputs,
                            {"generate": round(t_gen, 1), "bake": round(t_bake, 1)}, peak_rss_gb=rss,
@@ -189,6 +191,9 @@ def main(argv=None):
           f"texture={'none' if cfg['no_texture'] else cfg['texture_size']} bake_faces={cfg['bake_faces']} "
           f"normal_map={cfg['normal_map']} max_tokens={args.max_tokens}")
 
+    if args.attn_tile:
+        os.environ["ATTN_TILE"] = args.attn_tile
+        print(f"attn_tile={args.attn_tile}: tiled attention, score matrix bounded to H x {args.attn_tile.replace(',', ' x ')}")
     if args.attn_chunk:
         os.environ["ATTN_CHUNK"] = str(args.attn_chunk)
         print(f"attn_chunk={args.attn_chunk}: NOTE this can push PyTorch's MPS attention off its fused kernel "
