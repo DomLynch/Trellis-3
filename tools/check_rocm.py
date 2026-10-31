@@ -48,6 +48,19 @@ def main():
         print(f"SDPA 12x4096x128 peak {peak:.2f} GB -> {'fused (no score matrix)' if peak < 0.5 else 'math path (score matrix materialised; auto-tiling will engage at 1024)'}")
     except Exception as e:
         print(f"SDPA probe: FAILED ({e})")
+    print("\nNative ROCm ports (official GPU code paths; optional, from ComfyUI-Trellis2-AMD):")
+    ports = 0
+    for mod, why in (("flex_gemm", "GPU sparse conv (SPARSE_CONV_BACKEND=flex_gemm)"),
+                     ("cumesh", "GPU mesh ops for the official bake"),
+                     ("o_voxel.convert", "GPU mesh extraction (TRELLIS3_OVOXEL=native)"),
+                     ("o_voxel.postprocess", "official to_glb bake"),
+                     ("nvdiffrast.torch", "GPU rasteriser for the bake"),
+                     ("aule", "flash attention for AMD (ATTN_IMPL=aule)")):
+        try:
+            __import__(mod); ports += 1; print(f"  [OK ] {mod:<22} {why}")
+        except Exception as e:
+            print(f"  [ -- ] {mod:<22} {why}: not installed ({type(e).__name__})")
+    print(f"  -> {'native GPU paths available' if ports >= 5 else 'pure-PyTorch/CPU fallbacks will be used'}")
     problems = 0
     for mod, why in (("trellis3.stages", "staged sampling"), ("backends.conv_none", "pure-PyTorch sparse conv"),
                      ("backends.texture_baker", "CPU texture bake"), ("backends.attention_mps", "tiled attention")):
@@ -61,8 +74,9 @@ def main():
         print("  [OK ] xatlas                     UV unwrap for the CPU bake")
     except ImportError:
         problems += 1; print("  [MISSING] xatlas                 pip install xatlas")
-    print("\nSPARSE_CONV_BACKEND should be 'none' on ROCm (flex_gemm is CUDA/Metal only):",
-          os.environ.get("SPARSE_CONV_BACKEND", "(unset)"))
+    print("\nEnv: SPARSE_CONV_BACKEND=%s ATTN_IMPL=%s TRELLIS3_OVOXEL=%s" % (
+        os.environ.get("SPARSE_CONV_BACKEND", "(unset)"), os.environ.get("ATTN_IMPL", "(unset)"),
+        os.environ.get("TRELLIS3_OVOXEL", "(unset)")))
     return 0 if problems == 0 else 1
 
 

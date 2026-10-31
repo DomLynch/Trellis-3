@@ -16,18 +16,37 @@ import torch
 from PIL import Image as PILImage
 
 
-def _metal_bake_available():
-    """Mirror upstream's detection: Metal backend + rasterizer present."""
+def gpu_bake_backend():
+    """Which native `o_voxel.postprocess.to_glb` is usable, or None.
+
+    "metal": Pedro Naugusto's Apple fork (sets _BACKEND/_HAS_DR; wants CPU tensors).
+    "cuda":  Microsoft's o_voxel built for CUDA or ROCm (no _BACKEND attribute;
+             needs nvdiffrast + cumesh and cuda tensors). The ROCm wheels from
+             ComfyUI-Trellis2-AMD give exactly this on AMD.
+    """
     try:
         import o_voxel.postprocess
     except (ImportError, AttributeError):
-        return False
-    backend = getattr(o_voxel.postprocess, "_BACKEND", None)
-    has_dr = getattr(o_voxel.postprocess, "_HAS_DR", False)
-    use_metal = backend in ("metal", "cuda") and has_dr
-    if use_metal and not getattr(o_voxel.postprocess, "_HAS_FLEX_GEMM", False):
-        _patch_grid_sample_fallback(o_voxel.postprocess)
-    return use_metal
+        return None
+    pp = o_voxel.postprocess
+    if hasattr(pp, "_BACKEND"):                       # Apple fork
+        backend = getattr(pp, "_BACKEND", None)
+        has_dr = getattr(pp, "_HAS_DR", False)
+        if backend in ("metal", "cuda") and has_dr:
+            if not getattr(pp, "_HAS_FLEX_GEMM", False):
+                _patch_grid_sample_fallback(pp)
+            return backend
+        return None
+    try:                                              # official o_voxel: needs its CUDA/HIP deps
+        import nvdiffrast.torch  # noqa: F401
+        import cumesh  # noqa: F401
+    except Exception:
+        return None
+    return "cuda" if torch.cuda.is_available() else None
+
+
+def _metal_bake_available():
+    return gpu_bake_backend() is not None
 
 
 def _patch_grid_sample_fallback(pp):
@@ -139,17 +158,19 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
     t_bake = time.time()
 
     if has_voxels and not no_texture:
-        use_metal = _metal_bake_available()
+        gpu_backend = gpu_bake_backend()
+        use_metal = gpu_backend is not None
         if use_metal:
             try:
-                log(f"\nBaking PBR textures via Metal ({texture_size}x{texture_size})...")
+                bake_dev = "cuda" if gpu_backend == "cuda" and torch.cuda.is_available() else "cpu"
+                log(f"\nBaking PBR textures via {gpu_backend} ({texture_size}x{texture_size})...")
                 import o_voxel
                 from trellis3.postbake import apply_gamma, set_metallic_factor
                 target_faces = min(bake_faces, len(faces))
                 sv, sf = _simplify(verts, faces, target_faces, log)
                 sv, sf = _fix_winding(sv, sf, fix_winding, log)
-                simp_verts_t = torch.from_numpy(np.ascontiguousarray(sv)).float()
-                simp_faces_t = torch.from_numpy(np.ascontiguousarray(sf).astype("int32"))
+                simp_verts_t = torch.from_numpy(np.ascontiguousarray(sv)).float().to(bake_dev)
+                simp_faces_t = torch.from_numpy(np.ascontiguousarray(sf).astype("int32")).to(bake_dev)
                 uv_kwargs = {}
                 if uv_cone_deg is not None:
                     uv_kwargs["mesh_cluster_threshold_cone_half_angle_rad"] = np.radians(uv_cone_deg)
@@ -158,8 +179,8 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                 glb = o_voxel.postprocess.to_glb(
                     vertices=simp_verts_t,
                     faces=simp_faces_t,
-                    attr_volume=mesh_out.attrs.cpu(),
-                    coords=mesh_out.coords.cpu(),
+                    attr_volume=mesh_out.attrs.to(bake_dev),
+                    coords=mesh_out.coords.to(bake_dev),
                     attr_layout=mesh_out.layout,
                     voxel_size=mesh_out.voxel_size,
                     aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
@@ -193,7 +214,7 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                 glb.export(glb_path)
                 log(f"  Saved: {glb_path}")
                 paths["glb"] = glb_path
-                paths["bake"] = "metal"
+                paths["bake"] = gpu_backend
             except RuntimeError as e:
                 log(f"\n  Metal bake failed: {e}")
                 log("  Falling back to KDTree texture baker...")

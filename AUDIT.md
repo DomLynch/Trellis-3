@@ -223,6 +223,27 @@ same maths as the official `to_glb` at every step except UV unwrapping
 decoder output — the oracle here is `grid_sample`, which *is* the official
 sampler, so the remaining risk is integration, not maths.
 
+### Batch 11 — native ROCm ports ("Plan B" folded in)
+
+Found and inspected: dmonkman/ComfyUI-Trellis2-AMD ships real wheels
+(0.5–31 MB each, not LFS stubs) of `cumesh`, `flex_gemm`, `o_voxel`,
+`nvdiffrast` for ROCm 10 / torch 2.13, Windows + Linux, Python 3.12–3.14,
+multi-arch incl. gfx1150–1153; plus `aule_attention` on PyPI. Their modified
+TRELLIS.2 tree adds only an `aule` attention branch — no other ROCm-specific
+source changes, so Microsoft's code runs as-is on these wheels.
+
+| Item | How | Result |
+|---|---|---|
+| `gpu_bake_backend()`: Apple fork (metal/cuda via `_BACKEND`) vs official `o_voxel` (needs nvdiffrast + cumesh + cuda); tensors go to the right device per backend | `tests/test_export.py` | pass |
+| `ATTN_IMPL=aule` routes through `flash_attention_triton` per batch item only when requested and importable; silent fallback otherwise | `tests/test_attention_mps.py` (fake aule) | pass |
+| `TRELLIS3_OVOXEL=native` prefers the GPU `o_voxel.convert`, else pure-Python; idempotent patch | `tests/test_patch.py` | pass |
+| `setup_rocm.sh` ports mode parses; wheel selection by OS/Python | `bash -n` | pass |
+
+135 tests. None of the wheels were executed here (no AMD GPU). Risks on the
+Z13: ROCm 10 Windows wheel vs this exact chip, Triton on Windows for
+`flex_gemm` (`triton-windows`), and aule on gfx1151. `check_rocm.py` reports
+each one, and every native piece has a pure fallback behind an env var.
+
 ### First Mac measurements (reported by the Mac tester, 31 Oct 2026)
 
 - Peak memory 14.4 GB vs 20.6 GB upstream, same method (−30%). Confirms the

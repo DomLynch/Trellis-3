@@ -174,3 +174,16 @@ def test_voxel_lookup_install(tmp_path, monkeypatch):
     # stubs dir lives next to the patches/ folder in the real repo; redirect via chdir-free path hack
     pc.install_voxel_lookup()
     assert (root / "trellis2/modules/sparse/conv/t3_voxel_lookup.py").exists()
+
+
+def test_fdg_patch_native_opt_in(tmp_path, monkeypatch):
+    root = tmp_path / "TRELLIS.2"
+    d = root / "trellis2/models/sc_vaes"; d.mkdir(parents=True)
+    (d / "fdg_vae.py").write_text("from o_voxel.convert import flexible_dual_grid_to_mesh\nX = 1\n")
+    monkeypatch.setattr(pc, "TRELLIS_ROOT", str(root))
+    pc.patch_fdg_vae()
+    src = (d / "fdg_vae.py").read_text()
+    assert "TRELLIS3_OVOXEL" in src and "o_voxel_override_convert" in src
+    compile(src, "fdg_vae.py", "exec")
+    before = src; pc.patch_fdg_vae()
+    assert (d / "fdg_vae.py").read_text() == before

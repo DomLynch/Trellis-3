@@ -144,8 +144,31 @@ def auto_tiles(q, k, budget_gb=None):
     return q_tile, k_tile
 
 
+def _aule_available():
+    if os.environ.get("ATTN_IMPL", "").lower() != "aule":
+        return False
+    try:
+        from aule import flash_attention_triton  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def sdpa_aule(q, k, v):
+    """aule_attention (Triton flash attention for AMD/ROCm). q/k/v: [B, H, L|S, C].
+
+    Memory-bounded like a fused kernel, so neither tiling nor chunking is
+    needed on top. Per batch item because aule takes [H, n, C].
+    """
+    from aule import flash_attention_triton
+    outs = [flash_attention_triton(q[b], k[b], v[b], causal=False)[0] for b in range(q.shape[0])]
+    return torch.stack(outs, dim=0)
+
+
 def sdpa_chunked(sdpa_fn, q, k, v, chunk=None, tiles=None):
     """Attention dispatcher. q/k/v: [B, H, L|S, C].
+
+    ATTN_IMPL=aule   -> aule flash attention (ROCm), if importable
 
     ATTN_TILE=Lq,Sk  -> sdpa_tiled with those tiles (bounded memory, exact)
     ATTN_AUTO_GB=G   -> sdpa_tiled only when the score matrix would exceed G GB
@@ -154,6 +177,8 @@ def sdpa_chunked(sdpa_fn, q, k, v, chunk=None, tiles=None):
     ATTN_CHUNK=N     -> sdpa_fn over query chunks (bounds one axis only)
     otherwise        -> sdpa_fn as is
     """
+    if _aule_available():
+        return sdpa_aule(q, k, v)
     tiles = tile_sizes() if tiles is None else tiles
     if not tiles:
         tiles = auto_tiles(q, k)

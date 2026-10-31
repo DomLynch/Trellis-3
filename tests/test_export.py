@@ -70,7 +70,7 @@ def test_metal_path_wiring(tmp_path, monkeypatch):
     ov = types.ModuleType("o_voxel"); ov.postprocess = pp
     monkeypatch.setitem(sys.modules, "o_voxel", ov)
     monkeypatch.setitem(sys.modules, "o_voxel.postprocess", pp)
-    monkeypatch.setattr(ex, "_metal_bake_available", lambda: True)
+    monkeypatch.setattr(ex, "gpu_bake_backend", lambda: "metal")
 
     m = _Mesh(np.asarray(icos.vertices), faces)
     m.attrs = torch.zeros((1, 6)); m.coords = torch.zeros((1, 3), dtype=torch.int32)
@@ -112,7 +112,7 @@ def test_metal_path_normal_map(tmp_path, monkeypatch):
     ov = types.ModuleType("o_voxel"); ov.postprocess = pp
     monkeypatch.setitem(sys.modules, "o_voxel", ov)
     monkeypatch.setitem(sys.modules, "o_voxel.postprocess", pp)
-    monkeypatch.setattr(ex, "_metal_bake_available", lambda: True)
+    monkeypatch.setattr(ex, "gpu_bake_backend", lambda: "metal")
     monkeypatch.setattr(ex, "_simplify", lambda v, f, t, log: (v, f))  # keep full mesh
 
     m = _Mesh(np.asarray(icos.vertices), np.asarray(icos.faces))
@@ -131,7 +131,7 @@ def test_cpu_bake_path_trilinear_with_gamma_auto(tmp_path, monkeypatch):
     """Metal unavailable -> CPU bake: trilinear sampling, metallic pinned, gamma auto from the photo."""
     import trellis3.export as ex
     pytest.importorskip("xatlas")
-    monkeypatch.setattr(ex, "_metal_bake_available", lambda: False)
+    monkeypatch.setattr(ex, "gpu_bake_backend", lambda: None)
     box = trimesh.creation.box(extents=(0.5, 0.5, 0.5))
     g = np.arange(-5, 6)
     coords = np.stack(np.meshgrid(g, g, g, indexing="ij"), -1).reshape(-1, 3)
@@ -149,3 +149,31 @@ def test_cpu_bake_path_trilinear_with_gamma_auto(tmp_path, monkeypatch):
     assert abs(np.median(tex[tex > 0.05]) - 0.5) < 0.08
     glb = trimesh.load(str(tmp_path / "c.glb"), force="mesh")
     assert glb.visual.material.metallicFactor == 0.0
+
+
+def test_gpu_bake_backend_detection(monkeypatch):
+    import sys, types
+    import trellis3.export as ex
+    # Apple fork: _BACKEND present
+    pp = types.ModuleType("o_voxel.postprocess"); pp._BACKEND = "metal"; pp._HAS_DR = True; pp._HAS_FLEX_GEMM = True
+    ov = types.ModuleType("o_voxel"); ov.postprocess = pp
+    monkeypatch.setitem(sys.modules, "o_voxel", ov); monkeypatch.setitem(sys.modules, "o_voxel.postprocess", pp)
+    assert ex.gpu_bake_backend() == "metal"
+    pp._HAS_DR = False
+    assert ex.gpu_bake_backend() is None
+    # official o_voxel (no _BACKEND): needs nvdiffrast + cumesh + a cuda device
+    pp2 = types.ModuleType("o_voxel.postprocess"); ov2 = types.ModuleType("o_voxel"); ov2.postprocess = pp2
+    monkeypatch.setitem(sys.modules, "o_voxel", ov2); monkeypatch.setitem(sys.modules, "o_voxel.postprocess", pp2)
+    monkeypatch.setitem(sys.modules, "nvdiffrast", types.ModuleType("nvdiffrast"))
+    monkeypatch.setitem(sys.modules, "nvdiffrast.torch", types.ModuleType("nvdiffrast.torch"))
+    monkeypatch.setitem(sys.modules, "cumesh", types.ModuleType("cumesh"))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert ex.gpu_bake_backend() == "cuda"
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert ex.gpu_bake_backend() is None
+    monkeypatch.setitem(sys.modules, "cumesh", None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert ex.gpu_bake_backend() is None
+    # no o_voxel at all
+    monkeypatch.setitem(sys.modules, "o_voxel", None)
+    assert ex.gpu_bake_backend() is None

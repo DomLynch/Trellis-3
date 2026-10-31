@@ -39,6 +39,8 @@ def patch_sparse_config():
         "env_sparse_attn_backend in ['xformers', 'flash_attn', 'flash_attn_3']",
         "env_sparse_attn_backend in ['xformers', 'flash_attn', 'flash_attn_3', 'sdpa', 'naive']",
     )
+    # 'aule' (Triton flash attention for AMD) rides the same sdpa code path;
+    # the t3_sdpa helper switches to it when ATTN_IMPL=aule.
     write_file(path, src)
 
 
@@ -426,14 +428,24 @@ def patch_fdg_vae():
         "_stubs = os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'stubs')\n"
         "if _stubs not in sys.path:\n"
         "    sys.path.append(_stubs)\n"
-        "try:\n"
-        "    from o_voxel_override_convert import flexible_dual_grid_to_mesh\n"
-        "except ImportError:\n"
+        "# Trellis-3: TRELLIS3_OVOXEL=native uses the GPU o_voxel (CUDA / ROCm\n"
+        "# wheels); anything else keeps the pure-Python extraction.\n"
+        "_native = os.environ.get('TRELLIS3_OVOXEL', '').lower() == 'native'\n"
+        "flexible_dual_grid_to_mesh = None\n"
+        "if _native:\n"
         "    try:\n"
         "        from o_voxel.convert import flexible_dual_grid_to_mesh\n"
         "    except (ImportError, RuntimeError):\n"
-        "        def flexible_dual_grid_to_mesh(*args, **kwargs):\n"
-        '            raise RuntimeError("flexible_dual_grid_to_mesh unavailable")\n',
+        "        flexible_dual_grid_to_mesh = None\n"
+        "if flexible_dual_grid_to_mesh is None:\n"
+        "    try:\n"
+        "        from o_voxel_override_convert import flexible_dual_grid_to_mesh\n"
+        "    except ImportError:\n"
+        "        try:\n"
+        "            from o_voxel.convert import flexible_dual_grid_to_mesh\n"
+        "        except (ImportError, RuntimeError):\n"
+        "            def flexible_dual_grid_to_mesh(*args, **kwargs):\n"
+        '                raise RuntimeError("flexible_dual_grid_to_mesh unavailable")\n',
     )
     write_file(path, src)
 

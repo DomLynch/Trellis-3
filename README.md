@@ -127,7 +127,30 @@ python generate.py head.png --preset draft  --device rocm
 python generate.py head.png --preset master --device rocm --single-process --profile-memory
 ```
 
-What runs where on AMD:
+### Native ROCm ports (default, the fast path)
+
+`setup_rocm.sh` installs AMD's ROCm 10 PyTorch and the ROCm builds of the
+four CUDA-only libraries Microsoft's code uses — `flex_gemm`, `cumesh`,
+`o_voxel`, `nvdiffrast` — from
+[ComfyUI-Trellis2-AMD](https://github.com/dmonkman/ComfyUI-Trellis2-AMD)
+(fat multi-arch wheels covering RDNA1–4 incl. gfx1150–1153 = Ryzen AI Max+),
+plus `aule_attention` (Triton flash attention for AMD). With these on, every
+step runs the **official GPU code**: sparse conv on the GPU, GPU mesh
+extraction, the official `to_glb` bake with Microsoft's UV unwrapping, and
+memory-bounded attention — on a 64 GB machine that is the vanilla pipeline,
+nothing cut down. Needs Python 3.12 (the wheels' target).
+
+```bash
+export SPARSE_CONV_BACKEND=flex_gemm ATTN_BACKEND=sdpa SPARSE_ATTN_BACKEND=sdpa \
+       ATTN_IMPL=aule TRELLIS3_OVOXEL=native
+python tools/check_rocm.py          # lists the six native pieces; "native GPU paths available"
+```
+
+`ROCM_PORTS=0 bash setup_rocm.sh` is the no-wheels fallback (any ROCm torch,
+pure-PyTorch sparse conv, CPU bake). Wheel author's note: validated on
+RDNA2 (gfx1030); other targets are in the build but not individually tested.
+
+What runs where on AMD (pure mode; with the ports everything is GPU):
 
 | Piece | Path |
 |---|---|
@@ -147,6 +170,7 @@ always means the wrong wheel or a missing `HSA_OVERRIDE_GFX_VERSION`.
 Everything here was built on a 24 GB Air; on 64 GB (the Z13 or a 64 GB Mac)
 the memory tricks become optional and the ceiling moves up:
 
+- With `ATTN_IMPL=aule` attention is memory-bounded natively, so tiling never engages.
 - 1024 masters run **without** tiling (the 15 GB attention matrix just fits);
   the dispatcher tiles automatically only when the score matrix would exceed
   `ATTN_AUTO_GB` (default 6 GB) — so 1536 tiles itself, 1024 runs fused.

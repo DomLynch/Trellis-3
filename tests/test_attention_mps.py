@@ -129,3 +129,27 @@ def test_auto_tiles_only_when_over_budget(monkeypatch):
         calls.append(1); return F.scaled_dot_product_attention(a, b, c)
     out = am.sdpa_chunked(spy, q2, k2, v2)
     assert calls == [] and torch.allclose(out, F.scaled_dot_product_attention(q2, k2, v2), atol=1e-5)
+
+
+def test_aule_path_used_only_when_requested_and_importable(monkeypatch):
+    import sys, types
+    g = torch.Generator().manual_seed(8)
+    q = torch.randn(2, 3, 20, 8, generator=g); k = torch.randn(2, 3, 20, 8, generator=g); v = torch.randn(2, 3, 20, 8, generator=g)
+    ref = F.scaled_dot_product_attention(q, k, v)
+    calls = []
+
+    def fake_flash(qi, ki, vi, causal=False):
+        calls.append(qi.shape)
+        return (F.scaled_dot_product_attention(qi[None], ki[None], vi[None])[0], None)
+
+    fake = types.ModuleType("aule"); fake.flash_attention_triton = fake_flash
+    monkeypatch.setitem(sys.modules, "aule", fake)
+    monkeypatch.setenv("ATTN_IMPL", "")
+    am.sdpa_chunked(F.scaled_dot_product_attention, q, k, v)
+    assert calls == []                                     # not requested
+    monkeypatch.setenv("ATTN_IMPL", "aule")
+    out = am.sdpa_chunked(F.scaled_dot_product_attention, q, k, v)
+    assert calls == [(3, 20, 8), (3, 20, 8)] and torch.allclose(out, ref, atol=1e-5)
+    monkeypatch.delitem(sys.modules, "aule")
+    monkeypatch.setitem(sys.modules, "aule", None)         # import fails -> silent fallback
+    assert torch.allclose(am.sdpa_chunked(F.scaled_dot_product_attention, q, k, v), ref, atol=1e-5)
