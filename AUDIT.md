@@ -187,6 +187,21 @@ bake.
 125 tests. Defaults unchanged for 24 GB users (the 6 GB auto budget tiles
 the 1024 pass there, which is what the profile showed was needed).
 
+### Batch 9 — ROCm plumbing (for the ROG Flow Z13)
+
+| Item | How | Result |
+|---|---|---|
+| `--device` / `TRELLIS3_DEVICE`: auto order, explicit selection, loud failure when the backend is absent, `rocm` maps to `cuda` | `tests/test_memory.py` | pass |
+| Profiler reads CUDA/ROCm allocator when present | code path; no GPU here | unverified |
+| `setup_rocm.sh` parses; `tools/check_rocm.py` imports | `bash -n`, import | pass |
+
+125 tests. Nothing ROCm-specific has been executed: no AMD GPU in this
+container. Expected first-run issues on Strix Halo: wrong torch wheel for
+gfx1151 (`check_rocm.py` says so), SDPA falling to the math path (auto-tiling
+covers it), and `conv_none` speed. The two things that cannot be fixed from
+here without a device: the sparse-conv speed (needs a ROCm `flex_gemm`) and
+whatever the Windows ROCm wheel does differently from Linux.
+
 ### First Mac measurements (reported by the Mac tester, 31 Oct 2026)
 
 - Peak memory 14.4 GB vs 20.6 GB upstream, same method (−30%). Confirms the

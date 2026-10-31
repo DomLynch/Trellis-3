@@ -104,10 +104,45 @@ loads lazily on first use and stays loaded. Bake keys (`metallic_factor`,
 free RAM before starting a job instead of swapping. Every output gets a
 `.receipt.json`.
 
-## On a 64 GB Mac
+## AMD / ROCm (ROG Flow Z13, Ryzen AI Max+ 395, 64 GB)
 
-Everything here was built on a 24 GB Air; on 64 GB the memory tricks become
-optional and the ceiling moves up:
+Everything in Trellis-3 except the three Metal accelerators is plain PyTorch,
+so the AMD path is: ROCm torch wheel + the pure-PyTorch sparse conv + the CPU
+bake. The GPU presents itself as `cuda` to PyTorch.
+
+```bash
+# Linux (recommended) or WSL2; Windows with AMD's ROCm PyTorch wheel also works
+# via Git-Bash — set ROCM_TORCH_INDEX to AMD's Windows wheel index first.
+git clone https://github.com/DomLynch/Trellis-3.git && cd Trellis-3
+hf auth login
+bash setup_rocm.sh                      # ROCM_TORCH_INDEX=... to pick a wheel
+source .venv/bin/activate
+export SPARSE_CONV_BACKEND=none ATTN_BACKEND=sdpa SPARSE_ATTN_BACKEND=sdpa
+export HSA_OVERRIDE_GFX_VERSION=11.5.1  # only if ROCm does not list the 8060S
+python tools/check_rocm.py              # GPU seen? bf16 OK? which SDPA kernel?
+python generate.py head.png --preset draft  --device rocm
+python generate.py head.png --preset master --device rocm --single-process --profile-memory
+```
+
+What runs where on AMD:
+
+| Piece | Path |
+|---|---|
+| flow models, decoders, staged sampling, latents | GPU (ROCm) |
+| attention | PyTorch SDPA; auto-tiles if the ROCm build only has the math kernel |
+| sparse conv | `conv_none` (pure PyTorch gather/scatter) — correct, slower than flex_gemm |
+| mesh extraction, hole fill, winding, normal map | CPU |
+| texture bake | KDTree baker (xatlas) — the Metal/CUDA `to_glb` bake is not available |
+
+Known gaps: `conv_none` is the speed limiter (a ROCm `flex_gemm` port would
+fix it); `check_rocm.py` tells you whether SDPA is fused on this build.
+`--device rocm` fails loudly if torch cannot see the GPU, which almost
+always means the wrong wheel or a missing `HSA_OVERRIDE_GFX_VERSION`.
+
+## On a 64 GB machine
+
+Everything here was built on a 24 GB Air; on 64 GB (the Z13 or a 64 GB Mac)
+the memory tricks become optional and the ceiling moves up:
 
 - 1024 masters run **without** tiling (the 15 GB attention matrix just fits);
   the dispatcher tiles automatically only when the score matrix would exceed
@@ -151,6 +186,7 @@ The latents file (tens of MB) can also be decoded on another machine.
 --attn-tile LQ,SK         force exact tiled attention with these tiles
 --attn-auto-gb G          tile automatically when the score matrix would exceed G GB (default 6; 0 = never)
 --single-process          decode here even if the preset is two-stage
+--device auto|mps|cuda|rocm|cpu   compute device (rocm == cuda to PyTorch)
 --attn-chunk N            query-chunked full attention; exact. CAUTION: can force MPS off its fused kernel and use
                           MORE memory — only if the unchunked run OOMs inside a sampling pass
 --profile-memory          per-stage memory table (RSS, MPS driver, MPS allocator) + receipt entry

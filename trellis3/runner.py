@@ -61,18 +61,34 @@ def bootstrap():
         sys.path.insert(0, ROOT)
 
 
-def pick_device():
+def pick_device(prefer=None):
+    """auto (default): mps > cuda/rocm > cpu. `prefer` forces one; it must exist."""
     import torch
-    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        return torch.device("mps")
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    return torch.device("cpu")
+    prefer = (prefer or os.environ.get("TRELLIS3_DEVICE") or "auto").lower()
+    has_mps = bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
+    has_cuda = torch.cuda.is_available()      # True on ROCm builds too (HIP presents as cuda)
+    if prefer == "auto":
+        return torch.device("mps" if has_mps else "cuda" if has_cuda else "cpu")
+    if prefer == "mps" and not has_mps:
+        raise RuntimeError("MPS requested but not available")
+    if prefer in ("cuda", "rocm") and not has_cuda:
+        raise RuntimeError("CUDA/ROCm requested but torch.cuda.is_available() is False "
+                           "(install the ROCm or CUDA torch wheel for this GPU)")
+    return torch.device("cuda" if prefer == "rocm" else prefer)
+
+
+def describe_device(device):
+    import torch
+    if device.type == "cuda":
+        name = torch.cuda.get_device_name(0)
+        hip = getattr(torch.version, "hip", None)
+        return f"{name} ({'ROCm ' + hip if hip else 'CUDA ' + str(torch.version.cuda)})"
+    return str(device)
 
 
 class Runner:
     def __init__(self, pipeline_types, resident=False, stage_hooks=True,
-                 path="microsoft/TRELLIS.2-4B", decode_only=False, log=print):
+                 path="microsoft/TRELLIS.2-4B", decode_only=False, device=None, log=print):
         from trellis3 import memory
 
         self.log = log
@@ -85,9 +101,9 @@ class Runner:
         self.pipeline = memory.load_pipeline(pipeline_types, path=path, resident=resident,
                                              decode_only=decode_only)
         log(f"Loaded in {time.time() - t0:.0f}s")
-        self.device = pick_device()
+        self.device = pick_device(device)
         self.pipeline.to(self.device)
-        log(f"Device: {self.device}  low_vram={self.pipeline.low_vram}")
+        log(f"Device: {describe_device(self.device)}  low_vram={self.pipeline.low_vram}")
         if stage_hooks:
             memory.install_stage_hooks(self.pipeline)
         self._memory = memory

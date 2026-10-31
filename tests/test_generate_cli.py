@@ -46,7 +46,7 @@ def fake(monkeypatch):
     seen = {"runners": []}
 
     class FakeRunner:
-        def __init__(self, types, resident=False, stage_hooks=True, decode_only=False):
+        def __init__(self, types, resident=False, stage_hooks=True, decode_only=False, device="auto"):
             seen["runners"].append({"types": types, "decode_only": decode_only})
 
         def sample(self, image, pipeline_type, seed, steps, max_num_tokens, state, on_stage, release,

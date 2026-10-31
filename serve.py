@@ -287,6 +287,7 @@ def main(argv=None):
                    help="Split full attention into query chunks of N rows (0 = off)")
     p.add_argument("--attn-tile", default=None, metavar="LQ,SK",
                    help="Exact tiled attention with bounded memory, e.g. 2048,4096")
+    p.add_argument("--device", choices=["auto", "mps", "cuda", "rocm", "cpu"], default="auto")
     args = p.parse_args(argv)
     if args.attn_tile:
         os.environ["ATTN_TILE"] = args.attn_tile
@@ -296,7 +297,7 @@ def main(argv=None):
         p.error("give --watch and/or --http")
 
     types = [t.strip() for t in args.pipeline_types.split(",") if t.strip()]
-    server = JobServer(lambda: Runner(types, resident=args.resident), args.out,
+    server = JobServer(lambda: Runner(types, resident=args.resident, device=args.device), args.out,
                        thermal_guard=not args.no_thermal_guard, min_free_gb=args.min_free_gb,
                        mem_wait=args.mem_wait, receipts=not args.no_receipts)
     server.runner  # load now, not on first job

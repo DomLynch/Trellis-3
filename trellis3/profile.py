@@ -16,12 +16,18 @@ from trellis3.memory import rss_gb
 
 
 def _mps_readers():
+    """GPU memory readers for whichever backend is active (MPS, CUDA or ROCm)."""
     try:
         import torch
         if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
             return {
                 "mps_driver_gb": lambda: torch.mps.driver_allocated_memory() / 1e9,
                 "mps_alloc_gb": lambda: torch.mps.current_allocated_memory() / 1e9,
+            }
+        if torch.cuda.is_available():
+            return {
+                "gpu_reserved_gb": lambda: torch.cuda.memory_reserved() / 1e9,
+                "gpu_alloc_gb": lambda: torch.cuda.memory_allocated() / 1e9,
             }
     except Exception:
         pass

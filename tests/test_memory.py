@@ -197,3 +197,19 @@ def test_load_pipeline_decode_only_stubs_cond_models(fake_trellis2, monkeypatch,
     assert p.image_cond_model is None and p.rembg_model is None
     assert ife.DinoV3FeatureExtractor is Dino and rem.BiRefNet is Bi      # restored
     assert _FakePipeline.model_names_to_load == ["everything"]
+
+
+def test_pick_device_prefers_and_validates(monkeypatch):
+    from trellis3 import runner
+    import torch
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert runner.pick_device("cpu").type == "cpu"
+    assert runner.pick_device("auto").type in ("cpu", "mps")
+    with pytest.raises(RuntimeError, match="ROCm"):
+        runner.pick_device("rocm")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert runner.pick_device("rocm").type == "cuda"
+    assert runner.pick_device("cuda").type == "cuda"
+    monkeypatch.setenv("TRELLIS3_DEVICE", "cpu")
+    assert runner.pick_device().type == "cpu"
+    assert runner.describe_device(torch.device("cpu")) == "cpu"

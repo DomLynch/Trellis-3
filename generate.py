@@ -87,6 +87,8 @@ def build_parser():
                      help="Do not drop models after their stage (default drops them)")
     run.add_argument("--legacy-run", action="store_true",
                      help="Use upstream pipeline.run() in one call instead of staged sampling")
+    run.add_argument("--device", choices=["auto", "mps", "cuda", "rocm", "cpu"], default="auto",
+                     help="Compute device (auto: mps > cuda/rocm > cpu). ROCm builds appear as cuda")
     run.add_argument("--resident", action="store_true",
                      help="Keep loaded models on the GPU (low_vram=False). Opt-in, unmeasured on 24GB")
     run.add_argument("--no-stage-hooks", action="store_true",
@@ -222,7 +224,7 @@ def main(argv=None):
             print("Error: latents are incomplete; run without --from-latents and with --resume to finish sampling")
             sys.exit(4)
         runner = Runner(state["pipeline_type"], resident=args.resident,
-                        stage_hooks=not args.no_stage_hooks, decode_only=True)
+                        stage_hooks=not args.no_stage_hooks, decode_only=True, device=args.device)
         if profiler:
             profiler.mark("decode")
         try:
@@ -236,7 +238,8 @@ def main(argv=None):
         return
 
     # ---- sampling ------------------------------------------------------------
-    runner = Runner(cfg["pipeline_type"], resident=args.resident, stage_hooks=not args.no_stage_hooks)
+    runner = Runner(cfg["pipeline_type"], resident=args.resident, stage_hooks=not args.no_stage_hooks,
+                    device=args.device)
     img = PILImage.open(args.image)
     print(f"Input: {args.image} ({img.size[0]}x{img.size[1]})")
     if not args.no_thermal_guard:
