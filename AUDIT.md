@@ -94,6 +94,27 @@ if it already streams over keys, chunking is neutral; if it materialises
 exactly what `--profile-memory` is for — the `sample_shape_slat_cascade`
 row will show it. Nothing here was run on MPS.
 
+### Batch 5 — staged sampling, two-process decode, master preset
+
+| Item | How | Result |
+|---|---|---|
+| Stage order and arguments equal upstream `run()` for `512` and `1024_cascade` (cond resolutions, ss_res, cascade args, max_num_tokens, per-stage steps) | `tests/test_stages.py` against a recording fake pipeline | pass |
+| Models released after their stage (only the two decoders left), cond models dropped after conditioning | same | pass |
+| Resume skips completed stages, reuses the preprocessed image, restores RNG, refuses a mismatched seed/type | same | pass |
+| Memory guard checks before every sampler step, raises `MemoryPressure`, restores sampler methods, completed stages preserved | same | pass |
+| `decode_state` rebuilds sparse tensors and calls `decode_latent`; rejects incomplete state | same | pass |
+| Latents file round-trip (atomic write, CPU tensors, RNG, image bytes); foreign files rejected | `tests/test_latents.py` | pass |
+| Decode-only load: just the two decoders, DINOv3/BiRefNet never constructed, module attributes restored | `tests/test_memory.py` | pass |
+| CLI: staged run saves latents + receipt; `--preset master` spawns the child with the same args + `--from-latents`; decode-only path; incomplete latents exit 4; memory pressure exit 3 with partial latents; `--resume`; `--legacy-run` | `tests/test_generate_cli.py` | pass |
+
+118 tests, 7.6 s.
+
+Not verified on MPS: that `SparseTensor(feats, coords)` rebuilt from the
+saved state decodes identically to the in-memory one (coords/feats are saved
+verbatim, so it should), that `torch.mps.get/set_rng_state` round-trips, and
+the actual memory headroom a decode-only child process has (expected ~20 GB
+free on a 24 GB machine instead of ~8).
+
 ### First Mac measurements (reported by the Mac tester, 31 Oct 2026)
 
 - Peak memory 14.4 GB vs 20.6 GB upstream, same method (−30%). Confirms the

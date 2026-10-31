@@ -164,3 +164,36 @@ def test_parse_meminfo():
 def test_free_memory_gb_runs():
     v = memory.free_memory_gb()
     assert v is None or v > 0
+
+
+def test_load_pipeline_decode_only_stubs_cond_models(fake_trellis2, monkeypatch, tmp_path):
+    import json
+    ife = types.ModuleType("trellis2.modules.image_feature_extractor")
+    class Dino:
+        def __init__(self, **k): raise AssertionError("real DINOv3 must not be built")
+    ife.DinoV3FeatureExtractor = Dino
+    rem = types.ModuleType("trellis2.pipelines.rembg")
+    class Bi:
+        def __init__(self, **k): raise AssertionError("real BiRefNet must not be built")
+    rem.BiRefNet = Bi
+    monkeypatch.setitem(sys.modules, "trellis2.modules", types.ModuleType("trellis2.modules"))
+    monkeypatch.setitem(sys.modules, "trellis2.modules.image_feature_extractor", ife)
+    monkeypatch.setitem(sys.modules, "trellis2.pipelines.rembg", rem)
+    (tmp_path / "pipeline.json").write_text(json.dumps({"args": {
+        "models": {}, "image_cond_model": {"name": "DinoV3FeatureExtractor", "args": {}},
+        "rembg_model": {"name": "BiRefNet", "args": {}}}}))
+
+    # the fake from_pretrained does not build cond models, so emulate upstream here
+    orig = _FakePipeline.from_pretrained.__func__
+    def from_pretrained(cls, path):
+        p = orig(cls, path)
+        p.image_cond_model = ife.DinoV3FeatureExtractor(model_name="x")
+        p.rembg_model = rem.BiRefNet(model_name="y")
+        return p
+    monkeypatch.setattr(_FakePipeline, "from_pretrained", classmethod(from_pretrained))
+
+    p = memory.load_pipeline("1024_cascade", path=str(tmp_path), decode_only=True)
+    assert set(p.models) == set(memory.DECODE_ONLY)
+    assert p.image_cond_model is None and p.rembg_model is None
+    assert ife.DinoV3FeatureExtractor is Dino and rem.BiRefNet is Bi      # restored
+    assert _FakePipeline.model_names_to_load == ["everything"]

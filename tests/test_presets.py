@@ -4,8 +4,9 @@ from trellis3.presets import apply_preset
 
 
 def test_no_preset_is_upstream_default():
-    assert apply_preset(None) == {"pipeline_type": "512", "steps": None,
-                                  "texture_size": 1024, "no_texture": False}
+    d = apply_preset(None)
+    assert {k: d[k] for k in ("pipeline_type", "steps", "texture_size", "no_texture")} == {
+        "pipeline_type": "512", "steps": None, "texture_size": 1024, "no_texture": False}
 
 
 def test_draft_is_cheap():
@@ -36,3 +37,13 @@ def test_no_texture_overrides_final():
 def test_unknown_preset():
     with pytest.raises(ValueError):
         apply_preset("ultra")
+
+
+def test_master_preset_and_new_keys():
+    m = apply_preset("master")
+    assert m["pipeline_type"] == "1024_cascade" and m["texture_size"] == 4096
+    assert m["bake_faces"] == 1_000_000 and m["normal_map"] is True and m["two_stage"] is True
+    d = apply_preset("draft")
+    assert d["bake_faces"] == 200_000 and d["normal_map"] is False and d["two_stage"] is False
+    o = apply_preset("master", bake_faces=300_000, texture_size=2048)
+    assert o["bake_faces"] == 300_000 and o["texture_size"] == 2048 and o["normal_map"] is True

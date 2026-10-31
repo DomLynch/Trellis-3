@@ -31,6 +31,10 @@ released, how jobs are run, and what happens to the mesh after decoding.
 | Run receipt | — | `<output>.receipt.json`: settings, input hash/size, output hashes, timings, peak RSS, versions |
 | Server memory guard | — | `serve.py --min-free-gb N` waits for free RAM before each job, fails the job after `--mem-wait` |
 | Full-res detail in the bake | mtlbvh can't take the 800K-face decoder mesh, so the bake only ever sees the 200K simplified copy | CPU nearest-surface index on the full mesh: texels snap onto it before colour sampling (KDTree path) and `--normal-map` bakes a tangent-space normal map from it (both paths) |
+| Sampling vs decode | one `pipeline.run()` call: a decode crash loses 20 min of sampling, and the five flow models are still resident when the decoder starts | staged sampling with latents saved after every stage (`<output>.latents.pt`); each model dropped after its stage; `--two-stage` decodes in a fresh child process that loads only the two decoders (~1.9 GB); `--from-latents` / `--resume` |
+| Memory guard | killed from outside, output lost | `--min-free-gb N` checks free RAM before every sampler step and exits cleanly (code 3) with the finished stages on disk |
+| Steps | one `--steps` for all stages | `--ss-steps / --shape-steps / --tex-steps` (the texture stage is the slow one at 1024) |
+| Bake size | 200K faces hard-coded | `--bake-faces N`; `--preset master` = 1024, 4096 textures, 1M faces, normal map, two-stage |
 | 1024 attention memory | one SDPA call over all ~49K tokens, plus a padded copy of Q/K/V even for a single sequence | `--attn-chunk N` splits queries into chunks (exact; bounds the score matrix to H×N×S); uniform batches are zero-copy views |
 | Coordinate lookups | Python dict of tuples + `.item()` loops in mesh extraction and the naive sparse conv (minutes and GBs at 1024) | sorted int64 keys + `searchsorted`: 3.6M voxels / 14M queries in 2.3 s |
 | Memory attribution | — | `--profile-memory`: per-stage peak RSS / MPS driver / MPS allocator, printed and stored in the receipt |
@@ -95,6 +99,21 @@ loads lazily on first use and stays loaded. Bake keys (`metallic_factor`,
 free RAM before starting a job instead of swapping. Every output gets a
 `.receipt.json`.
 
+## Desktop master → phone
+
+```bash
+# master: 1024 shape, 4K textures, 1M-face bake, normal map; decode in a fresh process
+python generate.py head.png --preset master --output boss1_master --min-free-gb 3
+# it died at decode? sampling is on disk — just decode again
+python generate.py head.png --from-latents boss1_master.latents.pt --preset master --output boss1_master
+# it died during sampling? finished stages are kept
+python generate.py head.png --preset master --output boss1_master --resume
+# phone version: same latents, cheaper bake
+python generate.py head.png --from-latents boss1_master.latents.pt --output boss1_phone --texture-size 1024 --bake-faces 30000
+```
+
+The latents file (tens of MB) can also be decoded on another machine.
+
 ## generate.py options
 
 ```
@@ -109,7 +128,15 @@ free RAM before starting a job instead of swapping. Every output gets a
 --attn-chunk N            query-chunked full attention (try 4096 at 1024/1536); exact, memory-bounded
 --profile-memory          per-stage memory table (RSS, MPS driver, MPS allocator) + receipt entry
 --metallic-factor F       pin glTF metallicFactor (default 0.0; -1 keeps upstream's 1.0)
---gamma G|auto            apply 1/G to base colour on the Metal path; auto matches the photo (≈1.6–1.7 on heads)
+--gamma auto|G|0          base-colour gamma: auto matches the photo (default, ≈1.6–1.7 on heads), a number, or 0 for none
+--bake-faces N            baked/exported face count (default 200000; master 1000000)
+--ss-steps/--shape-steps/--tex-steps N   per-stage sampler steps
+--two-stage               sample here, decode + export in a child process
+--from-latents PATH       decode saved latents (loads decoders only)
+--resume                  continue from <output>.latents.pt
+--min-free-gb N           stop cleanly between steps when free RAM < N
+--keep-models             do not drop models after their stage
+--legacy-run              upstream pipeline.run() in one call
 --normal-map              bake a normal map from the full-res decoder mesh (CPU, ~20 s at 2048)
 --normal-flip-v           flip V for the normal map if it looks vertically wrong (Metal UV convention unverified)
 --no-snap-hires           KDTree path: don't snap texels onto the full-res mesh

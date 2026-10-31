@@ -73,24 +73,75 @@ def approx_gb(names: Iterable[str]) -> float:
     return sum(APPROX_BYTES.get(n, 0) for n in names) / 1e9
 
 
-def load_pipeline(pipeline_types, path="microsoft/TRELLIS.2-4B", resident=False):
+DECODE_ONLY = ["shape_slat_decoder", "tex_slat_decoder"]
+
+
+class _CondStub:
+    """Stands in for DINOv3 / BiRefNet when a process only decodes."""
+
+    def __init__(self, *a, **k):
+        pass
+
+    def to(self, *a, **k):
+        return self
+
+    def cpu(self):
+        return self
+
+    def __call__(self, *a, **k):
+        raise RuntimeError("conditioning models were not loaded (decode-only pipeline)")
+
+
+def _pipeline_args(path, config_file="pipeline.json"):
+    import json
+    import os
+    if os.path.exists(f"{path}/{config_file}"):
+        cfg = f"{path}/{config_file}"
+    else:
+        from huggingface_hub import hf_hub_download
+        cfg = hf_hub_download(path, config_file)
+    with open(cfg) as f:
+        return json.load(f)["args"]
+
+
+def load_pipeline(pipeline_types, path="microsoft/TRELLIS.2-4B", resident=False, decode_only=False):
     """Load only the checkpoints `pipeline_types` need.
 
     Uses the upstream `model_names_to_load` hook on the pipeline class so the
     base loader skips the rest. The class attribute is restored afterwards so
     other callers in the same process see upstream behaviour.
+
+    decode_only=True loads just the two decoders (~1.9 GB) and stubs the
+    conditioning models, for a process that decodes saved latents.
     """
     from trellis2.pipelines.trellis2_image_to_3d import Trellis2ImageTo3DPipeline
 
     if isinstance(pipeline_types, str):
         pipeline_types = [pipeline_types]
-    names = models_for(pipeline_types)
+    names = list(DECODE_ONLY) if decode_only else models_for(pipeline_types)
     original = Trellis2ImageTo3DPipeline.model_names_to_load
     Trellis2ImageTo3DPipeline.model_names_to_load = names
+    restore = []
     try:
+        if decode_only:
+            from trellis2.modules import image_feature_extractor
+            from trellis2.pipelines import rembg
+            args = _pipeline_args(path)
+            for mod, key in ((image_feature_extractor, "image_cond_model"), (rembg, "rembg_model")):
+                cls_name = args[key]["name"]
+                restore.append((mod, cls_name, getattr(mod, cls_name, None)))
+                setattr(mod, cls_name, _CondStub)
         pipeline = Trellis2ImageTo3DPipeline.from_pretrained(path)
     finally:
         Trellis2ImageTo3DPipeline.model_names_to_load = original
+        for mod, cls_name, orig in restore:
+            if orig is None:
+                delattr(mod, cls_name)
+            else:
+                setattr(mod, cls_name, orig)
+    if decode_only:
+        pipeline.image_cond_model = None
+        pipeline.rembg_model = None
     pipeline.low_vram = not resident
     pipeline._trellis3_path = path
     return pipeline

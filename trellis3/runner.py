@@ -72,17 +72,18 @@ def pick_device():
 
 class Runner:
     def __init__(self, pipeline_types, resident=False, stage_hooks=True,
-                 path="microsoft/TRELLIS.2-4B", log=print):
+                 path="microsoft/TRELLIS.2-4B", decode_only=False, log=print):
         from trellis3 import memory
 
         self.log = log
         if isinstance(pipeline_types, str):
             pipeline_types = [pipeline_types]
-        names = memory.models_for(pipeline_types)
-        log(f"\nLoading pipeline ({', '.join(pipeline_types)}): "
-            f"{len(names)} checkpoints, ~{memory.approx_gb(names):.1f} GB")
+        names = memory.DECODE_ONLY if decode_only else memory.models_for(pipeline_types)
+        what = "decode only" if decode_only else ", ".join(pipeline_types)
+        log(f"\nLoading pipeline ({what}): {len(names)} checkpoints, ~{memory.approx_gb(names):.1f} GB")
         t0 = time.time()
-        self.pipeline = memory.load_pipeline(pipeline_types, path=path, resident=resident)
+        self.pipeline = memory.load_pipeline(pipeline_types, path=path, resident=resident,
+                                             decode_only=decode_only)
         log(f"Loaded in {time.time() - t0:.0f}s")
         self.device = pick_device()
         self.pipeline.to(self.device)
@@ -90,6 +91,28 @@ class Runner:
         if stage_hooks:
             memory.install_stage_hooks(self.pipeline)
         self._memory = memory
+
+    def sample(self, image, pipeline_type="512", seed=42, steps=None, max_num_tokens=49152,
+               state=None, on_stage=None, release=False, min_free_gb=0.0):
+        """Staged, resumable sampling (trellis3.stages). Returns the state dict."""
+        from trellis3.stages import sample_stages
+        self._memory.ensure_models(self.pipeline, pipeline_type)
+        return sample_stages(self.pipeline, image, pipeline_type, seed=seed, steps=steps,
+                             max_num_tokens=max_num_tokens, state=state, on_stage=on_stage,
+                             release=release, min_free_gb=min_free_gb, log=self.log)
+
+    def decode(self, state):
+        """Decode a completed state (from sample() or a latents file)."""
+        from trellis3.stages import decode_state
+        try:
+            mesh = decode_state(self.pipeline, state, log=self.log)
+        except (IndexError, AssertionError) as e:
+            if any(sig in str(e) for sig in WATCHDOG_SIGNATURES):
+                raise WatchdogError(WATCHDOG_HELP) from e
+            raise
+        if mesh.vertices.shape[0] == 0 or mesh.faces.shape[0] == 0:
+            raise WatchdogError(WATCHDOG_HELP)
+        return mesh
 
     def generate(self, image, seed=42, pipeline_type="512", steps=None,
                  max_num_tokens=49152):
