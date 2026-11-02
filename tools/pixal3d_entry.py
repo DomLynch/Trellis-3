@@ -98,6 +98,27 @@ def install_raw_saver_and_fill_holes(prefix):
         return orig_decode(self, shape_slat, tex_slat, resolution)
 
     M.Pixal3DImageTo3DPipeline.decode_latent = decode_latent
+
+    # Save the high-resolution SHAPE sample the moment the sampler returns it, before the texture conditioning (the stage that has
+    # crashed) starts: a crash there then keeps the sampled shape. Identified by the sampler's progress-bar label.
+    from pixal3d.pipelines import samplers as S
+    cls = S.FlowEulerGuidanceIntervalSampler
+    orig_sample = cls.sample
+
+    def sample(self, model, noise, *args, **kwargs):
+        ret = orig_sample(self, model, noise, *args, **kwargs)
+        if "HR shape" in str(kwargs.get("tqdm_desc", "")):
+            try:
+                x = ret.samples
+                torch.save({"feats": x.feats.cpu(), "coords": x.coords.cpu(), "desc": kwargs.get("tqdm_desc")},
+                           prefix + "_shape_hr_samples.pt")
+                print(f"[raw] sampled HR shape latent saved -> {prefix}_shape_hr_samples.pt (before texture conditioning)",
+                      flush=True)
+            except Exception as e:  # noqa: BLE001
+                print(f"[raw] could not save the HR shape latent: {e}", flush=True)
+        return ret
+
+    cls.sample = sample
     saved = {"mesh": False}
 
     def fill_holes(self, max_hole_perimeter=3e-2):
