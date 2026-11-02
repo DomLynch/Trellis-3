@@ -176,11 +176,14 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                     uv_kwargs["mesh_cluster_threshold_cone_half_angle_rad"] = np.radians(uv_cone_deg)
                 if uv_smooth is not None:
                     uv_kwargs["mesh_cluster_smooth_strength"] = uv_smooth
-                glb = o_voxel.postprocess.to_glb(
+                from trellis3 import glb_lean
+                to_glb, late, lean_applied, lean_skipped = glb_lean.get_to_glb()   # attribute volume reaches the GPU only for the bake (issue 188)
+                paths["glb_lean"] = {"applied": lean_applied, "skipped": lean_skipped}
+                glb = to_glb(
                     vertices=simp_verts_t,
                     faces=simp_faces_t,
-                    attr_volume=mesh_out.attrs.to(bake_dev),
-                    coords=mesh_out.coords.to(bake_dev),
+                    attr_volume=mesh_out.attrs if late else mesh_out.attrs.to(bake_dev),
+                    coords=mesh_out.coords if late else mesh_out.coords.to(bake_dev),
                     attr_layout=mesh_out.layout,
                     voxel_size=mesh_out.voxel_size,
                     aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
