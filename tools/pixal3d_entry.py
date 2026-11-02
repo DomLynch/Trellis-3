@@ -158,6 +158,19 @@ def install_fill_holes_only(prefix):
     mesh_base.Mesh.fill_holes = fill_holes
 
 
+def log_allocator_state(tag):
+    """Print what the allocator will use, before the first HIP call, and force expandable_segments off if it leaked in."""
+    import torch
+    env = {k: os.environ.get(k, "") for k in ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_HIP_ALLOC_CONF", "PIXAL3D_ALLOC_CONF")}
+    print(f"[alloc:{tag}] env={env} backend={torch.cuda.memory.get_allocator_backend()}", flush=True)
+    if "expandable_segments:true" in "".join(env.values()).lower().replace(" ", ""):
+        try:
+            torch.cuda.memory._set_allocator_settings("expandable_segments:False,max_split_size_mb:2048")
+            print(f"[alloc:{tag}] expandable_segments was requested; forced off", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[alloc:{tag}] could not force it off: {e}", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True)
@@ -194,6 +207,7 @@ def main():
     else:
         import inference as P
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = os.environ.get("PIXAL3D_ALLOC_CONF", "max_split_size_mb:2048")  # inference*.py set it again at import
+    log_allocator_state("entry")
     try:
         import torch
         from pixal3d.trainers.flow_matching.mixins import image_conditioned_proj as ICP

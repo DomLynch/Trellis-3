@@ -39,6 +39,7 @@ def main():
     E.install_lazy_models(1)
     import inference_mv as P
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = os.environ.get("PIXAL3D_ALLOC_CONF", "max_split_size_mb:2048")
+    E.log_allocator_state("resume")
     import numpy as np
     import torch
     import o_voxel
@@ -51,6 +52,7 @@ def main():
     prefix = os.path.splitext(os.path.abspath(a.output))[0] + "_raw"
     E.install_fill_holes_only(prefix)
 
+    E.log_allocator_state("resume2")      # again after all imports, right before the first GPU allocation
     torch.set_grad_enabled(False)
     d = torch.load(a.shape_latent)
     m = re.search(r"proj,\s*(\d+)\)", str(d.get("desc", "")))
