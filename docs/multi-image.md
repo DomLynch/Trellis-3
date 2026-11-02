@@ -1,0 +1,71 @@
+# Multi-image input, projection texturing and Pixal3D
+
+One image only ever shows one side of a character, so the back and sides of a single-image mesh are guessed and often come out speckled or
+hollow. This branch adds three ways to give the model more views. Everything below is on `generate.py`; a single image with no new flag
+takes exactly the old code path.
+
+## 1. Multi-image conditioning (`--images`, `--fusion`)
+
+Port of microsoft/TRELLIS.2 pull request 104, re-implemented in `trellis3/multiview.py` so the upstream clone stays untouched. Each view is
+cut out and encoded separately; the per-view features are stacked and the sampler fuses them at every denoising step in all three stages
+(sparse structure, shape, texture). No camera poses are needed.
+
+```bash
+python generate.py --images front.png three_quarter.png back.png profile.png --preset master --texture-size 2048 --bake-faces 500000 --attn-auto-gb 28 --device rocm --single-process --output out/head
+```
+
+| flag | meaning |
+|---|---|
+| `--images A B C ...` | views of the same subject, front first. `generate.py A.png --images B.png` also works (A is the first view) |
+| `--fusion multidiffusion` (default) | every step averages the prediction of every view, then applies guidance once. N times the model calls, much more consistent |
+| `--fusion stochastic` | step k uses view k mod N. Same cost as one image, each step sees one view |
+
+Give cut-outs with an alpha channel and `TRELLIS3_REMBG=none` (the Factory's cut-out step does this). The first image is the main view. Order
+only matters for `stochastic`. Latents, receipt and resume work as before; the receipt lists `images` and `fusion`.
+
+## 2. Projection texturing (`--project`, `python -m trellis3.projection`)
+
+Re-implementation of the idea in ComfyUI-Trellis2's "Projection MultiView Texturing" node, CPU only. After the bake, every texel of the base
+colour texture is projected into each posed view. A view paints a texel if the texel is visible from it (depth test), faces it, and lies
+inside the view's cut-out. Views are blended by those weights and the TRELLIS texel keeps a small share (`--base-weight`, default 0.2), so
+texels no view sees stay as generated.
+
+```bash
+python generate.py --images front.png three_quarter.png back.png profile.png --yaws 0 45 180 90 --project --preset master --texture-size 2048 --bake-faces 500000 --output out/head
+# on an existing mesh:
+python -m trellis3.projection out/head.glb out/head_proj.glb --view front.png:0 --view three_quarter.png:45 --view back.png:180 --view profile.png:90
+```
+
+Camera convention when poses are unknown: orthographic, elevation 0, yaw 0 front, 45 three-quarter, 90 profile (the camera is on the model's
++X side, so the face points to image-left), 180 back. Nominal poses are refined per view by fitting yaw (only if it clearly helps), scale and
+shift to the mesh silhouette; the fit IoU is written to `<out>_proj.glb.projection.json`. Views must be RGBA cut-outs.
+
+## 3. Pixal3D (`--preset pixal3d`)
+
+TencentARC/Pixal3D (MIT) on the TRELLIS.2 backbone. It runs in its own venv; `trellis3/pixal3d.py` launches `tools/pixal3d_entry.py` there and
+produces the same layout as a TRELLIS run: `<output>.glb`, `<output>_basecolor.png`, `_normal.png` / `_metallic_roughness.png` if present,
+`<output>.receipt.json`.
+
+```bash
+python generate.py head_front.png --preset pixal3d --output out/head_px                                    # single view
+python generate.py front.png three_quarter.png profile.png back.png --yaws 0 45 90 180 --preset pixal3d --output out/head_px_mv
+```
+
+Several images use Pixal3D's native multi-view model (`*_mv` weights, posed cameras written to a `transforms.json` next to the output). The
+first image must be the front (yaw 0). The GLB is exported by the CPU port in `Pixal3D-run/pixal3d_glb_cpu.py` (no remesh) because cumesh
+crashes on this ROCm build; results are labelled PX-CPUGLB. Paths default to this machine; override with `PIXAL3D_PY`, `PIXAL3D_REPO`,
+`PIXAL3D_RUN`, `PIXAL3D_DINO`, `PIXAL3D_HF_HOME`, `PIXAL3D_TORCH_HOME`, `PIXAL3D_SHIMS`.
+
+Licences (reported, not decided): Pixal3D code and weights MIT (Tencent, with a responsible-use notice); TRELLIS.2 MIT; DINOv3 Meta's DINOv3
+License (its own terms, read it before shipping); BiRefNet MIT; MoGe-2 MIT; NAF Apache-2.0; RMBG-2.0 is non-commercial and is not used.
+
+## Turntable sheet
+
+`python tools/turntable.py mesh.glb [out_dir]` renders 12 yaw angles with Blender Cycles on the CPU, writes `contact.jpg` (4 x 3) and prints the
+near-black texel share of the base colour (texels covered in UV space, luminance under 8).
+
+## Tests
+
+`tests/test_multiview.py` (conditioning tensor shapes, fusion maths, restore), `tests/test_projection.py` (view geometry, blend, depth test,
+silhouette fit), `tests/test_pixal3d.py` (camera matrices against Pixal3D's example, view directory, command line, preset dispatch),
+`tests/test_generate_cli.py` (`--images`, receipt keys, single-image path unchanged). Set `HIP_VISIBLE_DEVICES=-1` to keep them off the GPU.
