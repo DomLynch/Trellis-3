@@ -141,12 +141,17 @@ class _Guard:
 
 
 def sample_stages(pipeline, image, pipeline_type, seed=42, steps=None, max_num_tokens=49152,
-                  state=None, on_stage=None, release=False, min_free_gb=0.0, probe=None, log=print):
+                  state=None, on_stage=None, release=False, min_free_gb=0.0, probe=None, log=print,
+                  fusion="multidiffusion"):
     """Run the sampling stages, resuming from `state` if it has completed ones.
 
     Returns the state dict: pipeline_type, seed, image_png (preprocessed),
     coords, shape_feats, shape_coords, res, tex_feats, done (list), rng.
     `on_stage(name, state)` is called after each completed stage.
+
+    `image` may be a list of views (see trellis3.multiview); with more than one
+    the per-view conditioning is fused by `fusion` (multidiffusion|stochastic).
+    A single image takes the unchanged upstream path.
     """
     import torch
     from PIL import Image
@@ -170,25 +175,43 @@ def sample_stages(pipeline, image, pipeline_type, seed=42, steps=None, max_num_t
             on_stage(stage, state)
 
     # --- preprocess + seed (identical order to upstream run) -----------------
-    if "image_png" in state:
-        img = Image.open(io.BytesIO(state["image_png"]))
-        img.load()
+    from trellis3 import multiview
+    images = list(image) if isinstance(image, (list, tuple)) else [image]
+    if "image_pngs" in state:
+        imgs = []
+        for b in state["image_pngs"]:
+            im = Image.open(io.BytesIO(b))
+            im.load()
+            imgs.append(im)
+    elif "image_png" in state:
+        imgs = [Image.open(io.BytesIO(state["image_png"]))]
+        imgs[0].load()
     else:
-        img = pipeline.preprocess_image(image)
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        state["image_png"] = buf.getvalue()
+        imgs = [pipeline.preprocess_image(im) for im in images]
+        pngs = []
+        for im in imgs:
+            buf = io.BytesIO()
+            im.save(buf, format="PNG")
+            pngs.append(buf.getvalue())
+        state["image_png"] = pngs[0]
+        if len(pngs) > 1:
+            state["image_pngs"] = pngs
+            state["fusion"] = fusion
+    n_views = len(imgs)
+    if n_views > 1:
+        fusion = state.get("fusion", fusion)
+        log(f"  multi-image conditioning: {n_views} views, fusion={fusion}")
     if done:
         _rng_restore(state.get("rng"))
     else:
         torch.manual_seed(seed)
 
-    cond_512 = pipeline.get_cond([img], 512)
-    cond_1024 = pipeline.get_cond([img], 1024) if pipeline_type != "512" else None
+    cond_512 = multiview.get_cond_multi(pipeline, imgs, 512)
+    cond_1024 = multiview.get_cond_multi(pipeline, imgs, 1024) if pipeline_type != "512" else None
     if release:
         _release_cond(pipeline, log)
 
-    with _Guard(pipeline, min_free_gb, probe=probe):
+    with _Guard(pipeline, min_free_gb, probe=probe), multiview.inject_pipeline(pipeline, n_views, fusion):
         # --- coords ------------------------------------------------------------
         if "coords" not in done:
             t0 = time.time()

@@ -109,13 +109,13 @@ class Runner:
         self._memory = memory
 
     def sample(self, image, pipeline_type="512", seed=42, steps=None, max_num_tokens=49152,
-               state=None, on_stage=None, release=False, min_free_gb=0.0):
+               state=None, on_stage=None, release=False, min_free_gb=0.0, fusion="multidiffusion"):
         """Staged, resumable sampling (trellis3.stages). Returns the state dict."""
         from trellis3.stages import sample_stages
         self._memory.ensure_models(self.pipeline, pipeline_type)
         return sample_stages(self.pipeline, image, pipeline_type, seed=seed, steps=steps,
                              max_num_tokens=max_num_tokens, state=state, on_stage=on_stage,
-                             release=release, min_free_gb=min_free_gb, log=self.log)
+                             release=release, min_free_gb=min_free_gb, log=self.log, fusion=fusion)
 
     def decode(self, state):
         """Decode a completed state (from sample() or a latents file)."""

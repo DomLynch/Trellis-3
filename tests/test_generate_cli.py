@@ -50,8 +50,9 @@ def fake(monkeypatch):
             seen["runners"].append({"types": types, "decode_only": decode_only})
 
         def sample(self, image, pipeline_type, seed, steps, max_num_tokens, state, on_stage, release,
-                   min_free_gb):
-            seen.update(pipeline_type=pipeline_type, seed=seed, steps=steps, tokens=max_num_tokens,
+                   min_free_gb, fusion="multidiffusion"):
+            seen.update(fusion=fusion, n_images=len(image) if isinstance(image, list) else 1,
+                        pipeline_type=pipeline_type, seed=seed, steps=steps, tokens=max_num_tokens,
                         release=release, min_free_gb=min_free_gb, resumed=state is not None)
             st = {"pipeline_type": pipeline_type, "seed": seed, "done": [], "res": 512,
                   "shape_feats": torch.zeros(2, 2), "shape_coords": torch.zeros(2, 4), "tex_feats": torch.zeros(2, 2)}
@@ -156,3 +157,24 @@ def test_main_missing_image_exits(tmp_path):
     with pytest.raises(SystemExit) as e:
         generate.main([str(tmp_path / "nope.png")])
     assert e.value.code == 1
+
+
+def test_images_option_passes_all_views_and_fusion(img, tmp_path, fake):
+    out = str(tmp_path / "mv")
+    generate.main(["--images", img, img, img, "--fusion", "stochastic", "--output", out])
+    assert fake["n_images"] == 3 and fake["fusion"] == "stochastic"
+    r = json.load(open(out + ".receipt.json"))
+    assert r["settings"]["images"] == [img, img, img] and r["settings"]["fusion"] == "stochastic"
+
+
+def test_single_image_receipt_has_no_multiview_keys(img, tmp_path, fake):
+    out = str(tmp_path / "one")
+    generate.main([img, "--output", out])
+    assert fake["n_images"] == 1
+    r = json.load(open(out + ".receipt.json"))
+    assert "images" not in r["settings"] and "fusion" not in r["settings"]
+
+
+def test_positional_plus_images_makes_positional_first(img, tmp_path, fake):
+    generate.main([img, "--images", img, "--output", str(tmp_path / "p")])
+    assert fake["n_images"] == 2

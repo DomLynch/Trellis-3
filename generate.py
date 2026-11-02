@@ -46,7 +46,14 @@ def _gamma_arg(v):
 
 def build_parser():
     p = argparse.ArgumentParser(description="Generate 3D mesh from an image using TRELLIS.2")
-    p.add_argument("image", help="Path to input image")
+    p.add_argument("image", nargs="?", default=None,
+                   help="Path to input image (or use --images for several views)")
+    p.add_argument("--images", nargs="+", metavar="IMG", default=None,
+                   help="Several views of the same subject (front first, e.g. front three-quarter profile back). "
+                        "Fused during sampling; replaces the positional image")
+    p.add_argument("--fusion", choices=["multidiffusion", "stochastic"], default="multidiffusion",
+                   help="multidiffusion: average every view at every step (default, N x model calls). "
+                        "stochastic: one view per step, cycling (single-image cost)")
     p.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
     p.add_argument("--output", default="output_3d", help="Output filename without extension")
     p.add_argument("--preset", choices=sorted(PRESETS), default=None,
@@ -174,6 +181,8 @@ def _export_and_finish(args, cfg, mesh, t0, t_gen, profiler, extra_settings):
         settings = {**cfg, "seed": args.seed,
                     "resident": args.resident, "attn_chunk": args.attn_chunk, "attn_tile": args.attn_tile,
                     "steps_per_stage": steps_spec(args, cfg), **bake_kwargs(args, cfg), **extra_settings}
+        if len(args.images) > 1:
+            settings.update(images=list(args.images), fusion=args.fusion)
         rp = write_receipt(args.output, settings, args.image, outputs,
                            {"generate": round(t_gen, 1), "bake": round(t_bake, 1)}, peak_rss_gb=rss,
                            extra=extra or None)
@@ -184,11 +193,22 @@ def _export_and_finish(args, cfg, mesh, t0, t_gen, profiler, extra_settings):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    args = build_parser().parse_args(argv)
-
-    if not os.path.exists(args.image):
-        print(f"Error: {args.image} not found")
-        sys.exit(1)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.images and args.image:
+        # `generate.py a.png --images b.png c.png`: the positional one is the first view
+        args.images = [args.image] + list(args.images)
+    if not args.images:
+        if not args.image:
+            parser.error("give an image, or --images a.png b.png ...")
+        args.images = [args.image]
+    args.image = args.images[0]
+    if len(args.images) > 1 and args.legacy_run:
+        parser.error("--legacy-run takes a single image; drop it to use --images")
+    for path in args.images:
+        if not os.path.exists(path):
+            print(f"Error: {path} not found")
+            sys.exit(1)
 
     cfg = apply_preset(args.preset, pipeline_type=args.pipeline_type, steps=args.steps,
                        texture_size=args.texture_size, no_texture=args.no_texture,
@@ -244,8 +264,10 @@ def main(argv=None):
     # ---- sampling ------------------------------------------------------------
     runner = Runner(cfg["pipeline_type"], resident=args.resident, stage_hooks=not args.no_stage_hooks,
                     device=args.device)
-    img = PILImage.open(args.image)
-    print(f"Input: {args.image} ({img.size[0]}x{img.size[1]})")
+    imgs = [PILImage.open(p) for p in args.images]
+    for p_, im_ in zip(args.images, imgs):
+        print(f"Input: {p_} ({im_.size[0]}x{im_.size[1]})")
+    img = imgs if len(imgs) > 1 else imgs[0]
     if not args.no_thermal_guard:
         wait_until_cool()
 
@@ -269,7 +291,7 @@ def main(argv=None):
             state = runner.sample(img, pipeline_type=cfg["pipeline_type"], seed=args.seed,
                                   steps=steps_spec(args, cfg), max_num_tokens=cfg["max_num_tokens"],
                                   state=state, on_stage=on_stage, release=not args.keep_models,
-                                  min_free_gb=args.min_free_gb)
+                                  min_free_gb=args.min_free_gb, fusion=args.fusion)
             t_sample = time.time() - t0
             print(f"Sampling time: {t_sample:.1f}s")
 
