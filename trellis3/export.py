@@ -45,6 +45,28 @@ def gpu_bake_backend():
     return "cuda" if torch.cuda.is_available() else None
 
 
+def gpu_bake_unavailable_reason():
+    """Why gpu_bake_backend() is None, for the log line of the CPU fallback ('' when a GPU baker is usable)."""
+    if gpu_bake_backend() is not None:
+        return ""
+    try:
+        import o_voxel
+        where = getattr(o_voxel, "__file__", None) or "?"
+    except Exception as e:
+        return f"o_voxel does not import ({e!r})"
+    try:
+        import o_voxel.postprocess  # noqa: F401
+    except Exception as e:
+        hint = " (o_voxel resolves to a STUB package: keep the repo's stubs/ dir off PYTHONPATH, bootstrap() appends it last)" if "stubs" in where.replace("\\", "/") else ""
+        return f"o_voxel.postprocess does not import ({e!r}); o_voxel is {where}{hint}"
+    for mod in ("nvdiffrast.torch", "cumesh"):
+        try:
+            __import__(mod)
+        except Exception as e:
+            return f"{mod} does not import ({e!r})"
+    return "torch.cuda.is_available() is False" if not torch.cuda.is_available() else "backend probe returned None"
+
+
 def _metal_bake_available():
     return gpu_bake_backend() is not None
 
@@ -230,7 +252,8 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                 use_metal = False
 
         if not use_metal:
-            log(f"\nBaking PBR textures on CPU ({texture_size}x{texture_size}, {bake_sampling})...")
+            why_cpu = "the GPU bake raised (see above)" if (has_voxels and gpu_bake_backend()) else (gpu_bake_unavailable_reason() or "not available")
+            log(f"\nBaking PBR textures on CPU ({texture_size}x{texture_size}, {bake_sampling}); GPU baker not used: {why_cpu}")
             from backends.texture_baker import uv_unwrap, bake_texture, build_textured_mesh
             from trellis3.postbake import apply_gamma, auto_gamma, set_metallic_factor
 
