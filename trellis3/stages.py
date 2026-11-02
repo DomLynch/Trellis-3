@@ -353,7 +353,7 @@ def _peak_gb():
     try:
         import torch
         if torch.cuda.is_available():
-            return torch.cuda.max_memory_allocated() / 1e9
+            return torch.cuda.max_memory_allocated() / 2**30   # GiB, same unit as torch's OOM messages and tools/memcheck_188.py (was /1e9: 21.4 'GB' = 19.9 GiB)
     except Exception:
         pass
     return None
@@ -467,5 +467,5 @@ def decode_state(pipeline, state, log=print, lean=True, tile_voxels=None, attrs_
     mesh = out[0] if isinstance(out, list) else out
     peak = _peak_gb()
     log(f"  decode: {mesh.vertices.shape[0]:,} vertices, {mesh.faces.shape[0]:,} faces ({time.time() - t0:.0f}s)"
-        + (f", peak GPU {peak:.1f} GB" if peak else ""))
+        + (f", peak GPU {peak:.1f} GiB" if peak else ""))
     return mesh
