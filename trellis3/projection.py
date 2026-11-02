@@ -133,6 +133,8 @@ def fit_view(points, alpha, yaw0, yaw_range=15.0, seed=0, yaw_margin=0.02):
                 for sign in (-1, 1):
                     cand = dict(s=s, dx=dx, dy=dy, yaw=yaw)
                     cand[k] += sign * delta
+                    if k == "yaw" and abs(cand["yaw"] - yaw0) > yaw_range:
+                        continue                      # never leave the allowed window around the nominal pose
                     v = _iou(_silhouette(sub, centre, cand["yaw"], cand["s"], cand["dx"], cand["dy"], cw), target)
                     if v > sc + 1e-4:
                         sc, s, dx, dy, yaw = v, cand["s"], cand["dx"], cand["dy"], cand["yaw"]
@@ -143,8 +145,16 @@ def fit_view(points, alpha, yaw0, yaw_range=15.0, seed=0, yaw_margin=0.02):
 
 
 # ------------------------------------------------------------------ weights and blend
-def facing_weight(nrm, d, power=3.0, floor=0.1):
+def facing_weight(nrm, d, power=3.0, floor=0.1, signed=False):
+    """Weight from the angle between surface normal and view direction.
+
+    TRELLIS meshes have ragged, inconsistently wound faces, so the sign of a vertex normal is unreliable
+    (about 40% point inward on a real head). The depth test already restricts painting to the surface nearest the
+    camera, so by default only |cos| is used; `signed=True` zeroes back-facing normals (clean meshes).
+    """
     cos = nrm @ d
+    if not signed:
+        cos = np.abs(cos)
     return np.clip((cos - floor) / (1 - floor), 0, 1) ** power
 
 
@@ -160,23 +170,37 @@ def depth_visible(x, y, z, size, extent, kernel=5, tol=0.02):
     return z >= filled[yi, xi] - tol * extent
 
 
-def blend(base, view_colours, view_weights, base_weight=0.2, sharp=2.0):
-    """base (N,3) float; per-view colours (N,3) and weights (N,). Weighted mean, base keeps `base_weight`."""
-    num = base * base_weight
-    den = np.full(len(base), base_weight, np.float64)
-    for c, w in zip(view_colours, view_weights):
-        ww = np.asarray(w, np.float64) ** sharp
-        num = num + c * ww[:, None]
-        den = den + ww
-    return num / den[:, None], den - base_weight
+def blend(base, view_colours, view_weights, tau=0.15, sharp=2.0):
+    """base (N,3) float; per-view colours (N,3) and weights (N,) in [0,1].
+
+    The views are averaged against each other (weights ** sharp), so a grazing view cannot be drowned by the
+    original texel. How much of the original survives is decided by confidence = min(1, strongest view weight / tau):
+    texels no view sees keep the original, texels one view sees well take that view. Returns (colour, confidence).
+    """
+    ws = [np.asarray(w, np.float64) for w in view_weights]
+    num = np.zeros_like(base, dtype=np.float64)
+    den = np.zeros(len(base), np.float64)
+    for c, w in zip(view_colours, ws):
+        ww = w ** sharp
+        num += c * ww[:, None]
+        den += ww
+    view = num / np.maximum(den, 1e-12)[:, None]
+    conf = np.clip(np.max(np.stack(ws), axis=0) / tau, 0.0, 1.0) if ws else np.zeros(len(base))
+    return view * conf[:, None] + base * (1.0 - conf)[:, None], conf
 
 
-def sample_image(img, x, y):
+def sample_image(img, x, y, width=2048):
+    """Bilinear lookup of img (H,W[,C]) at float pixel coords. Returns (N, C). Maps are laid out as a 2-D grid
+    because cv2.remap rejects more than 32767 rows."""
     import cv2
-    mx = x.astype(np.float32).reshape(-1, 1)
-    my = y.astype(np.float32).reshape(-1, 1)
-    out = cv2.remap(img, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-    return out.reshape(len(x), -1)
+    n = len(x)
+    rows = -(-n // width)
+    mx = np.zeros(rows * width, np.float32)
+    my = np.zeros(rows * width, np.float32)
+    mx[:n], my[:n] = x, y
+    out = cv2.remap(img, mx.reshape(rows, width), my.reshape(rows, width), cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    return out.reshape(rows * width, -1)[:n]
 
 
 def _erode_alpha(alpha, frac=0.012):
@@ -203,10 +227,10 @@ def load_views(specs):
     return out
 
 
-def project_texture(glb_in, glb_out, view_specs, base_weight=0.2, sharp=2.0, power=3.0, fit=True, log=print):
+def project_texture(glb_in, glb_out, view_specs, tau=0.15, sharp=2.0, power=3.0, fit=True, log=print):
     import trimesh
     t0 = time.time()
-    scene = trimesh.load(glb_in)
+    scene = trimesh.load(glb_in, process=False)
     geom = list(scene.geometry.values())[0] if hasattr(scene, "geometry") else scene
     mat = geom.visual.material
     base_tex = np.asarray(mat.baseColorTexture.convert("RGB")).copy()
@@ -241,7 +265,7 @@ def project_texture(glb_in, glb_out, view_specs, base_weight=0.2, sharp=2.0, pow
                        "texels_seen_pct": round(100 * float((wt > 0.05).mean()), 1)})
         log(f"  view {os.path.basename(path)}: yaw {yaw:g} -> {fitp['yaw']:.1f}, IoU {fitp['iou']}, "
             f"seen {report[-1]['texels_seen_pct']}%")
-    new, strength = blend(base, cols, wts, base_weight, sharp)
+    new, strength = blend(base, cols, wts, tau, sharp)
     out_tex = base_tex.copy()
     out_tex[ys, xs] = np.clip(new, 0, 255).astype(np.uint8)
     covered = np.zeros((H, W), bool)
@@ -250,7 +274,7 @@ def project_texture(glb_in, glb_out, view_specs, base_weight=0.2, sharp=2.0, pow
     from PIL import Image
     mat.baseColorTexture = Image.fromarray(out_tex)
     scene.export(glb_out)
-    stat = {"glb_in": glb_in, "glb_out": glb_out, "views": report, "base_weight": base_weight, "sharp": sharp,
+    stat = {"glb_in": glb_in, "glb_out": glb_out, "views": report, "tau": tau, "sharp": sharp,
             "texels_changed_pct": round(100 * float((strength > 0.05).mean()), 1), "seconds": round(time.time() - t0, 1)}
     json.dump(stat, open(glb_out + ".projection.json", "w"), indent=1)
     log(json.dumps(stat))
@@ -264,11 +288,12 @@ def main(argv=None):
     ap.add_argument("--view", action="append", required=True, metavar="IMG:YAW",
                     help="cut-out RGBA view and its nominal yaw in degrees (repeat per view; front 0, three-quarter 45, "
                          "profile 90, back 180)")
-    ap.add_argument("--base-weight", type=float, default=0.2, help="share kept by the TRELLIS texel (default 0.2)")
+    ap.add_argument("--tau", type=float, default=0.15, help="view weight at which a texel is fully repainted (default 0.15); "
+                                                              "lower repaints more, higher keeps more of the TRELLIS texel")
     ap.add_argument("--sharp", type=float, default=2.0, help="view weight exponent; higher = less blending")
     ap.add_argument("--no-fit", action="store_true", help="trust the nominal poses")
     a = ap.parse_args(argv)
-    project_texture(a.glb_in, a.glb_out, a.view, a.base_weight, a.sharp, fit=not a.no_fit)
+    project_texture(a.glb_in, a.glb_out, a.view, a.tau, a.sharp, fit=not a.no_fit)
 
 
 if __name__ == "__main__":

@@ -27,27 +27,37 @@ def test_rasterize_uv_quad_barycentrics():
     assert set(f) == {0, 1}
 
 
-def test_blend_weights():
-    base = np.array([[100.0, 100, 100], [100, 100, 100]])
-    red = np.array([[200.0, 0, 0], [200, 0, 0]])
-    out, strength = pj.blend(base, [red], [np.array([1.0, 0.0])], base_weight=0.25, sharp=1.0)
-    assert np.allclose(out[1], base[1])             # unseen texel keeps the base colour
-    assert np.allclose(out[0], (base[0] * 0.25 + red[0]) / 1.25)
-    assert strength[0] == pytest.approx(1.0) and strength[1] == 0
+def test_blend_unseen_keeps_base_seen_takes_view():
+    base = np.full((2, 3), 100.0)
+    red = np.tile([200.0, 0, 0], (2, 1))
+    out, conf = pj.blend(base, [red], [np.array([0.5, 0.0])], tau=0.25, sharp=1.0)
+    assert np.allclose(out[1], base[1]) and conf[1] == 0       # unseen texel keeps the base colour
+    assert np.allclose(out[0], red[0]) and conf[0] == 1        # confident texel is fully repainted
 
 
-def test_blend_two_views_equal_weight_averages():
+def test_blend_weak_view_is_partial_not_drowned():
+    base = np.full((1, 3), 100.0)
+    view = np.full((1, 3), 200.0)
+    out, conf = pj.blend(base, [view], [np.array([0.05])], tau=0.1, sharp=1.0)
+    assert conf[0] == pytest.approx(0.5) and out[0, 0] == pytest.approx(150.0)
+
+
+def test_blend_two_views_weighted_average():
     base = np.zeros((1, 3))
     a, b = np.full((1, 3), 40.0), np.full((1, 3), 80.0)
-    out, _ = pj.blend(base, [a, b], [np.ones(1), np.ones(1)], base_weight=0.0, sharp=1.0)
+    out, _ = pj.blend(base, [a, b], [np.ones(1), np.ones(1)], tau=0.1, sharp=1.0)
     assert np.allclose(out, 60.0)
+    out, _ = pj.blend(base, [a, b], [np.full(1, 1.0), np.full(1, 3.0)], tau=0.1, sharp=1.0)
+    assert out[0, 0] == pytest.approx((40 + 240) / 4)
 
 
 def test_facing_weight_monotonic_and_zero_behind():
     d = np.array([0, 0, 1.0])
     n = np.array([[0, 0, 1.0], [0, 0.7071, 0.7071], [0, 0, -1.0]])
-    w = pj.facing_weight(n, d)
+    w = pj.facing_weight(n, d, signed=True)
     assert w[0] == 1.0 and 0 < w[1] < 1 and w[2] == 0
+    w2 = pj.facing_weight(n, d)             # default ignores the sign of unreliable normals
+    assert w2[2] == 1.0 and w2[0] == 1.0
 
 
 def test_depth_visible_hides_far_point():

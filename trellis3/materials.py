@@ -52,7 +52,7 @@ def metallic_roughness(rgb, blur=3):
 def apply_materials(glb_in, glb_out, log=print):
     import trimesh
     from PIL import Image
-    sc = trimesh.load(glb_in)
+    sc = trimesh.load(glb_in, process=False)
     g = list(sc.geometry.values())[0] if hasattr(sc, "geometry") else sc
     m = g.visual.material
     rgb = np.asarray(m.baseColorTexture.convert("RGB"))

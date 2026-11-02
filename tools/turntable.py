@@ -80,7 +80,7 @@ def near_black(glb, lum=8):
     import cv2
     import numpy as np
     import trimesh
-    sc = trimesh.load(glb)
+    sc = trimesh.load(glb, process=False)
     g = list(sc.geometry.values())[0] if hasattr(sc, "geometry") else sc
     tex = np.asarray(g.visual.material.baseColorTexture.convert("RGB"))
     H, W = tex.shape[:2]

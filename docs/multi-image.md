@@ -27,7 +27,7 @@ only matters for `stochastic`. Latents, receipt and resume work as before; the r
 
 Re-implementation of the idea in ComfyUI-Trellis2's "Projection MultiView Texturing" node, CPU only. After the bake, every texel of the base
 colour texture is projected into each posed view. A view paints a texel if the texel is visible from it (depth test), faces it, and lies
-inside the view's cut-out. Views are blended by those weights and the TRELLIS texel keeps a small share (`--base-weight`, default 0.2), so
+inside the view's cut-out. Views are blended by those weights and the TRELLIS texel is kept where no view is confident (`--tau`, default 0.15), so
 texels no view sees stay as generated.
 
 ```bash
