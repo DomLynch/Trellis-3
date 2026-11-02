@@ -8,7 +8,7 @@ export MAX_JOBS=16 FORCE_CUDA=1
 apt-get update -qq && apt-get install -y -qq git ninja-build libjpeg-dev >/dev/null
 pip install -q ninja setuptools wheel pybind11 huggingface_hub
 W=/tmp/wheels; mkdir -p $W /tmp/ext; cd /tmp/ext
-git clone -q https://github.com/microsoft/TRELLIS.2.git
+git clone -q --recursive https://github.com/microsoft/TRELLIS.2.git
 git clone -q -b v0.4.0 https://github.com/NVlabs/nvdiffrast.git
 git clone -q --recursive https://github.com/JeffreyXiang/CuMesh.git
 git clone -q --recursive https://github.com/JeffreyXiang/FlexGEMM.git
