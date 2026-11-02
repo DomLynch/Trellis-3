@@ -81,8 +81,13 @@ def main():
         {"steps": 12, "guidance_strength": 1.0, "guidance_rescale": 0.0, "rescale_t": 3.0})
     del cond_tex
     torch.cuda.empty_cache()
+    torch.save({"feats": tex_slat.feats.cpu(), "coords": tex_slat.coords.cpu(), "res": res}, prefix + "_tex_latent.pt")
+    print(f"[raw] sampled texture latent saved -> {prefix}_tex_latent.pt", flush=True)
     mesh = pipeline.decode_latent(shape_slat, tex_slat, res)[0]
     print(f"[resume] decoded: {mesh.vertices.shape[0]:,} vertices, {mesh.faces.shape[0]:,} faces", flush=True)
+    torch.save({"vertices": mesh.vertices.cpu(), "faces": mesh.faces.cpu(), "coords": mesh.coords.cpu(), "attrs": mesh.attrs.cpu(),
+                "res": res}, prefix + "_decoded.pt")
+    print(f"[raw] decoded mesh with voxel attributes saved -> {prefix}_decoded.pt", flush=True)
 
     with memlog.stage("to_glb"):
         glb = o_voxel.postprocess.to_glb(
