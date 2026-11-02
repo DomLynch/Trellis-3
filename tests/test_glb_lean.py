@@ -40,6 +40,9 @@ def test_off_switch_returns_upstream(monkeypatch):
     import types, sys
     fake = types.ModuleType("o_voxel.postprocess")
     fake.to_glb = lambda: "upstream"
+    pkg = types.ModuleType("o_voxel")
+    pkg.postprocess = fake   # `import o_voxel.postprocess as pp` reads the attribute of the package
+    monkeypatch.setitem(sys.modules, "o_voxel", pkg)
     monkeypatch.setitem(sys.modules, "o_voxel.postprocess", fake)
     fn, late = glb_lean.get_to_glb()
     assert fn() == "upstream" and late is False
