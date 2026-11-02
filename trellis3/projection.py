@@ -160,13 +160,29 @@ def facing_weight(nrm, d, power=3.0, floor=0.1, signed=False):
 
 def depth_visible(x, y, z, size, extent, kernel=5, tol=0.02):
     """Splat the texel cloud into a z-buffer (nearest wins) and test each texel against it."""
+    zb = depth_buffer(x, y, z, size)
+    return depth_test(zb, x, y, z, extent, kernel, tol)
+
+
+def depth_buffer(x, y, z, size, zb=None, chunk=4_000_000):
+    """Accumulate the nearest depth per pixel (nearest = larger z). Chunked so 8K texel clouds fit in RAM."""
+    if zb is None:
+        zb = np.full(size, -1e9, np.float32)
+    for i in range(0, len(x), chunk):
+        xi = np.clip(np.rint(x[i:i + chunk]).astype(np.int32), 0, size[1] - 1)
+        yi = np.clip(np.rint(y[i:i + chunk]).astype(np.int32), 0, size[0] - 1)
+        zc = z[i:i + chunk].astype(np.float32)
+        o = np.argsort(zc)                                  # far first, near last: last write wins
+        xi, yi, zc = xi[o], yi[o], zc[o]
+        zb[yi, xi] = np.maximum(zb[yi, xi], zc)
+    return zb
+
+
+def depth_test(zb, x, y, z, extent, kernel=5, tol=0.02):
     import cv2
-    zmin = z.min()
-    xi, yi = np.clip(x.round().astype(int), 0, size[1] - 1), np.clip(y.round().astype(int), 0, size[0] - 1)
-    order = np.argsort(z)                                  # far first, near last: last write wins
-    zb = np.full(size, -1e9, np.float32)
-    zb[yi[order], xi[order]] = z[order]
     filled = cv2.dilate(zb, np.ones((kernel, kernel), np.uint8))
+    xi = np.clip(np.rint(x).astype(np.int32), 0, zb.shape[1] - 1)
+    yi = np.clip(np.rint(y).astype(np.int32), 0, zb.shape[0] - 1)
     return z >= filled[yi, xi] - tol * extent
 
 
@@ -227,55 +243,113 @@ def load_views(specs):
     return out
 
 
-def project_texture(glb_in, glb_out, view_specs, tau=0.15, sharp=2.0, power=3.0, fit=True, log=print):
+class Accumulator:
+    """Running weighted blend of the views: avoids holding every view's colours at once (8K = 30M texels)."""
+
+    def __init__(self, n, sharp=2.0):
+        self.num = np.zeros((n, 3), np.float32)
+        self.den = np.zeros(n, np.float32)
+        self.maxw = np.zeros(n, np.float32)
+        self.sharp = sharp
+
+    def add(self, col, w):
+        ww = (w.astype(np.float32)) ** self.sharp
+        self.num += col.astype(np.float32) * ww[:, None]
+        self.den += ww
+        np.maximum(self.maxw, w.astype(np.float32), out=self.maxw)
+
+    def result(self, base, tau):
+        view = self.num / np.maximum(self.den, 1e-12)[:, None]
+        conf = np.clip(self.maxw / tau, 0.0, 1.0)
+        return view * conf[:, None] + base.astype(np.float32) * (1.0 - conf)[:, None], conf
+
+
+def project_texture(glb_in, glb_out, view_specs, tau=0.15, sharp=2.0, power=3.0, fit=True, size=None,
+                    out_png=None, front_only_mask=None, chunk=4_000_000, log=print):
+    """Repaint the base-colour texture of `glb_in` from posed RGBA views.
+
+    size: output texture side (default: the GLB's own texture; a missing texture starts as neutral grey).
+    front_only_mask: UV-space image; white texels (eyes, mouth interior) are painted by the FIRST view only.
+    out_png: also write the new base-colour texture as a PNG.
+    """
     import trimesh
+    from PIL import Image
     t0 = time.time()
     scene = trimesh.load(glb_in, process=False)
     geom = list(scene.geometry.values())[0] if hasattr(scene, "geometry") else scene
     mat = geom.visual.material
-    base_tex = np.asarray(mat.baseColorTexture.convert("RGB")).copy()
+    tex0 = getattr(mat, "baseColorTexture", None)
+    if tex0 is None:
+        tex0 = Image.new("RGB", (size or 2048,) * 2, (128, 128, 128))
+    if size and tex0.size != (size, size):
+        tex0 = tex0.convert("RGB").resize((size, size), Image.Resampling.LANCZOS)
+    base_tex = np.asarray(tex0.convert("RGB")).copy()
     H, W = base_tex.shape[:2]
     uv = np.asarray(geom.visual.uv, np.float64)
     uv_faces = uv[np.asarray(geom.faces)]
     ys, xs, pos, nrm = texel_geometry(geom, uv_faces, H, W)
-    log(f"texels covered: {len(ys):,} of {H * W:,} ({H}x{W})")
-    base = base_tex[ys, xs].astype(np.float64)
+    pos, nrm = pos.astype(np.float32), nrm.astype(np.float32)
+    n = len(ys)
+    log(f"texels covered: {n:,} of {H * W:,} ({H}x{W})")
+    base = base_tex[ys, xs]
     extent = float(np.ptp(pos[:, 1]))
-    cols, wts, report = [], [], []
-    for path, yaw, rgba in load_views(view_specs):
+    centre0 = ((pos.min(0) + pos.max(0)) / 2).astype(np.float64)
+    front_only = None
+    if front_only_mask is not None:
+        m = Image.open(front_only_mask).convert("L").resize((W, H), Image.Resampling.NEAREST)
+        front_only = (np.asarray(m)[ys, xs] > 127)
+        log(f"front-only texels: {int(front_only.sum()):,}")
+    acc = Accumulator(n, sharp)
+    report = []
+    for vi, (path, yaw, rgba) in enumerate(load_views(view_specs)):
         alpha = rgba[..., 3]
         if alpha.min() == 255:
             raise ValueError(f"{path} has no cut-out alpha; run the cut-out step first")
         fitp = fit_view(pos, alpha, yaw) if fit else None
         if fitp is None:
             fitp = {"yaw": yaw, "scale": rgba.shape[0] / max(extent, 1e-9), "dx": 0.0, "dy": 0.0, "iou": None,
-                    "centre": (pos.min(0) + pos.max(0)) / 2}
+                    "centre": centre0}
         h, w = alpha.shape
-        x, y, z = project(pos, fitp["centre"], fitp["yaw"], fitp["scale"], fitp["dx"], fitp["dy"], w / 2, h / 2)
-        vis = depth_visible(x * 0.5, y * 0.5, z, (h // 2 + 1, w // 2 + 1), extent)
+        zb = np.full((h // 2 + 1, w // 2 + 1), -1e9, np.float32)
+        for i in range(0, n, chunk):                     # pass 1: nearest-surface depth buffer
+            x, y, z = project(pos[i:i + chunk], fitp["centre"], fitp["yaw"], fitp["scale"], fitp["dx"],
+                              fitp["dy"], w / 2, h / 2)
+            depth_buffer(x * 0.5, y * 0.5, z, zb.shape, zb)
         _, _, d = view_basis(fitp["yaw"])
-        wf = facing_weight(nrm, d, power)
-        wa = sample_image(_erode_alpha(alpha), x, y)[:, 0] / 255.0
-        inside = (x >= 0) & (x < w - 1) & (y >= 0) & (y < h - 1)
-        wt = wf * wa * vis * inside
-        col = sample_image(np.ascontiguousarray(rgba[..., :3]), x, y).astype(np.float64)
-        cols.append(col)
-        wts.append(wt)
+        ealpha = _erode_alpha(alpha)
+        rgb = np.ascontiguousarray(rgba[..., :3])
+        seen = 0
+        for i in range(0, n, chunk):                     # pass 2: weights and colour per chunk
+            sl = slice(i, i + chunk)
+            x, y, z = project(pos[sl], fitp["centre"], fitp["yaw"], fitp["scale"], fitp["dx"], fitp["dy"],
+                              w / 2, h / 2)
+            vis = depth_test(zb, x * 0.5, y * 0.5, z, extent)
+            wf = facing_weight(nrm[sl], d, power)
+            wa = sample_image(ealpha, x, y)[:, 0] / 255.0
+            inside = (x >= 0) & (x < w - 1) & (y >= 0) & (y < h - 1)
+            wt = wf * wa * vis * inside
+            if front_only is not None and vi > 0:
+                wt = np.where(front_only[sl], 0.0, wt)
+            acc.add(sample_image(rgb, x, y), wt)
+            seen += int((wt > 0.05).sum())
         report.append({"view": path, "yaw_nominal": yaw, "yaw_fit": round(fitp["yaw"], 1), "iou": fitp["iou"],
-                       "texels_seen_pct": round(100 * float((wt > 0.05).mean()), 1)})
+                       "texels_seen_pct": round(100 * seen / n, 1)})
         log(f"  view {os.path.basename(path)}: yaw {yaw:g} -> {fitp['yaw']:.1f}, IoU {fitp['iou']}, "
             f"seen {report[-1]['texels_seen_pct']}%")
-    new, strength = blend(base, cols, wts, tau, sharp)
+    new, conf = acc.result(base, tau)
     out_tex = base_tex.copy()
     out_tex[ys, xs] = np.clip(new, 0, 255).astype(np.uint8)
     covered = np.zeros((H, W), bool)
     covered[ys, xs] = True
     out_tex = fill_gutter(out_tex, covered)
-    from PIL import Image
-    mat.baseColorTexture = Image.fromarray(out_tex)
+    img = Image.fromarray(out_tex)
+    if out_png:
+        img.save(out_png)
+    mat.baseColorTexture = img
     scene.export(glb_out)
-    stat = {"glb_in": glb_in, "glb_out": glb_out, "views": report, "tau": tau, "sharp": sharp,
-            "texels_changed_pct": round(100 * float((strength > 0.05).mean()), 1), "seconds": round(time.time() - t0, 1)}
+    stat = {"glb_in": glb_in, "glb_out": glb_out, "texture": [W, H], "views": report, "tau": tau, "sharp": sharp,
+            "front_only_mask": front_only_mask, "out_png": out_png,
+            "texels_changed_pct": round(100 * float((conf > 0.05).mean()), 1), "seconds": round(time.time() - t0, 1)}
     json.dump(stat, open(glb_out + ".projection.json", "w"), indent=1)
     log(json.dumps(stat))
     return stat
@@ -292,8 +366,13 @@ def main(argv=None):
                                                               "lower repaints more, higher keeps more of the TRELLIS texel")
     ap.add_argument("--sharp", type=float, default=2.0, help="view weight exponent; higher = less blending")
     ap.add_argument("--no-fit", action="store_true", help="trust the nominal poses")
+    ap.add_argument("--size", type=int, default=None, help="output texture side in pixels (default: the GLB's own, e.g. 8192)")
+    ap.add_argument("--out-png", default=None, help="also write the new base-colour texture as a PNG")
+    ap.add_argument("--front-only-mask", default=None,
+                    help="UV-space mask image; white texels (eyes, mouth interior) are painted by the first view only")
     a = ap.parse_args(argv)
-    project_texture(a.glb_in, a.glb_out, a.view, a.tau, a.sharp, fit=not a.no_fit)
+    project_texture(a.glb_in, a.glb_out, a.view, a.tau, a.sharp, fit=not a.no_fit, size=a.size,
+                    out_png=a.out_png, front_only_mask=a.front_only_mask)
 
 
 if __name__ == "__main__":

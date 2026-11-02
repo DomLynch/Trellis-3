@@ -80,3 +80,54 @@ def test_fit_view_recovers_shift_and_scale():
     fit = pj.fit_view(pts, alpha, yaw0=0.0)
     assert fit["iou"] > 0.9
     assert abs(fit["yaw"]) < 6
+
+
+def test_accumulator_matches_blend():
+    rng = np.random.default_rng(0)
+    base = rng.uniform(0, 255, (50, 3))
+    cols = [rng.uniform(0, 255, (50, 3)) for _ in range(3)]
+    ws = [rng.uniform(0, 0.6, 50) for _ in range(3)]
+    want, wconf = pj.blend(base, cols, ws, tau=0.2, sharp=2.0)
+    acc = pj.Accumulator(50, 2.0)
+    for c, w in zip(cols, ws):
+        acc.add(c, w)
+    got, gconf = acc.result(base, 0.2)
+    assert np.allclose(got, want, atol=0.05) and np.allclose(gconf, wconf, atol=1e-5)
+
+
+def _quad_glb(path):
+    import trimesh
+    from PIL import Image
+    v = np.array([[-.5, -.5, 0], [.5, -.5, 0], [.5, .5, 0], [-.5, .5, 0]], float)
+    f = np.array([[0, 1, 2], [0, 2, 3]])
+    uv = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], float)
+    m = trimesh.Trimesh(v, f, process=False)
+    m.visual = trimesh.visual.TextureVisuals(uv=uv, material=trimesh.visual.material.PBRMaterial(
+        baseColorTexture=Image.new("RGB", (32, 32), (10, 10, 10))))
+    m.export(path)
+
+
+def _view(path, color):
+    from PIL import Image
+    im = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+    im.paste(Image.new("RGBA", (240, 240), color), (8, 8))
+    im.save(path)
+
+
+def test_project_texture_end_to_end_size_png_and_front_only(tmp_path):
+    from PIL import Image
+    _quad_glb(str(tmp_path / "q.glb"))
+    _view(tmp_path / "front.png", (200, 0, 0, 255))
+    _view(tmp_path / "other.png", (0, 0, 200, 255))
+    mask = Image.new("L", (64, 64), 0)
+    mask.paste(255, (0, 0, 32, 64))                     # left half of the texture is front-only
+    mask.save(tmp_path / "mask.png")
+    stat = pj.project_texture(str(tmp_path / "q.glb"), str(tmp_path / "o.glb"),
+                              [f"{tmp_path / 'front.png'}:0", f"{tmp_path / 'other.png'}:0"], fit=False, size=64,
+                              out_png=str(tmp_path / "o.png"), front_only_mask=str(tmp_path / "mask.png"),
+                              log=lambda *_: None)
+    out = np.asarray(Image.open(tmp_path / "o.png").convert("RGB")).astype(int)
+    assert out.shape == (64, 64, 3) and stat["texture"] == [64, 64]
+    left, right = out[32, 16], out[32, 48]
+    assert left[0] > 150 and left[2] < 40               # front-only texel: red only
+    assert right[0] > 20 and right[2] > 20              # shared texel: red and blue blended

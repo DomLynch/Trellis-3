@@ -212,6 +212,8 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                                 f"{np.round(mr, 3)} -> gamma {gamma:.2f}")
                 if apply_gamma(glb, gamma):
                     log(f"  gamma {gamma} applied to base colour")
+                else:
+                    log(f"  gamma {gamma}: base colour left as baked (no gamma applied)")
                 paths["gamma"] = gamma
                 if normal_map:
                     hires = _hires_index(verts, faces, log)
@@ -279,6 +281,8 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                 g = 2.2                            # upstream default when nothing else is asked
             if apply_gamma(glb, g):
                 log(f"  gamma {g} applied to base colour")
+            else:
+                log(f"  gamma {g}: base colour left as baked (no gamma applied)")
             paths["gamma"] = g
             glb.visual.material.baseColorTexture.convert("RGB").save(tex_path)
             t_w = time.time()
