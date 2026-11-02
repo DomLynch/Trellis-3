@@ -57,6 +57,9 @@ def build_parser():
     p.add_argument("--project", action="store_true",
                    help="After baking, repaint the base-colour texture from the posed views (needs RGBA cut-outs); "
                         "writes <output>_proj.glb next to the TRELLIS glb")
+    p.add_argument("--pixal-resident", action="store_true",
+                   help="--preset pixal3d: keep all Pixal3D models on the GPU (no low_vram). With --pipeline-type 1536_cascade "
+                        "this is Pixal3D's maximum setting; needs the 32 GB GPU share")
     p.add_argument("--fusion", choices=["multidiffusion", "stochastic"], default="multidiffusion",
                    help="multidiffusion: average every view at every step (default, N x model calls). "
                         "stochastic: one view per step, cycling (single-image cost)")

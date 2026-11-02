@@ -101,11 +101,12 @@ def write_views_dir(images, yaws, out_dir, cutout=None):
     return out_dir
 
 
-def build_command(images, output, yaws=None, seed=42, resolution=-1, low_vram=True, views_dir=None, glb="cpu"):
+def build_command(images, output, yaws=None, seed=42, resolution=-1, low_vram=True, views_dir=None, glb="cpu",
+                  max_tokens=49152):
     """Command line for tools/pixal3d_entry.py under the Pixal3D venv."""
     cmd = [conf("PIXAL3D_PY"), "-u", ENTRY, "--repo", conf("PIXAL3D_REPO"), "--run-dir", conf("PIXAL3D_RUN"),
            "--dino-dir", conf("PIXAL3D_DINO"), "--output", output + ".glb", "--seed", str(seed),
-           "--resolution", str(resolution), "--glb", glb]
+           "--resolution", str(resolution), "--glb", glb, "--max-tokens", str(max_tokens)]
     if low_vram:
         cmd.append("--low-vram")
     if len(images) > 1:
@@ -159,8 +160,11 @@ def run_from_args(args, log=print):
     if len(images) > 1:
         views_dir = write_views_dir(images, yaws, out + "_views")
         log(f"Pixal3D multi-view: {len(images)} views, yaws {yaws}, views dir {views_dir}")
-    cmd = build_command(images, out, yaws, seed=args.seed, views_dir=views_dir,
-                        resolution=1024 if args.pipeline_type in (None, "1024_cascade") else -1)
+    res = {"1024_cascade": 1024, "1536_cascade": 1536}.get(args.pipeline_type, -1)
+    low = not getattr(args, "pixal_resident", False)
+    cmd = build_command(images, out, yaws, seed=args.seed, views_dir=views_dir, resolution=res, low_vram=low,
+                        max_tokens=args.max_tokens or 49152)
+    log(f"Pixal3D resolution={'auto' if res < 0 else res} low_vram={low}")
     t0 = time.time()
     log("Launching Pixal3D: " + " ".join(cmd[2:]))
     code = subprocess.run(cmd, env=build_env(), cwd=conf("PIXAL3D_REPO")).returncode
@@ -172,7 +176,7 @@ def run_from_args(args, log=print):
     files = [glb] + extract_textures(glb, out)
     if not args.no_receipt:
         rp = write_receipt(out, {"preset": "pixal3d", "seed": args.seed, "images": images, "yaws": yaws,
-                                 "mode": "multiview" if len(images) > 1 else "single",
+                                 "mode": "multiview" if len(images) > 1 else "single", "resolution": res, "low_vram": low,
                                  "licence": "Pixal3D MIT (Tencent); DINOv3 Meta licence; BiRefNet MIT; NAF Apache-2.0"},
                            images[0], files, {"pixal3d": round(wall, 1)})
         log(f"Receipt: {rp}")
