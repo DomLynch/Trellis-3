@@ -66,7 +66,7 @@ def test_generate_dispatches_pixal3d_preset(tmp_path, monkeypatch):
     seen = {}
     monkeypatch.setattr(pixal3d, "run_from_args", lambda a: seen.update(images=a.images, yaws=a.yaws) or 0)
     with pytest.raises(SystemExit) as e:
-        generate.main(["--images", str(img), str(img), "--yaws", "0", "90", "--preset", "pixal3d",
+        generate.main(["--images", str(img), str(img), "--yaws", "0", "90", "--preset", "pixal3d", "--allow-battery",
                        "--output", str(tmp_path / "o")])
     assert e.value.code == 0 and seen["yaws"] == [0.0, 90.0] and len(seen["images"]) == 2
 

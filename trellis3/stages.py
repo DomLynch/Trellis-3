@@ -349,15 +349,65 @@ def _make_sparse(feats, coords, device):
     return SparseTensor(feats=feats.to(device), coords=coords.to(device))
 
 
-def decode_state(pipeline, state, log=print):
-    """Decode a completed state into a MeshWithVoxel (upstream decode_latent)."""
+def _peak_gb():
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return torch.cuda.max_memory_allocated() / 1e9
+    except Exception:
+        pass
+    return None
+
+
+def decode_latent_lean(pipeline, shape_slat, tex_slat, resolution):
+    """pipeline.decode_latent with the sampling data released before mesh post-processing.
+
+    Same maths and the same output as upstream decode_latent. Upstream keeps the shape latent, the texture latent
+    and the decoder's sub-structures alive while `Mesh.fill_holes()` builds its adjacency structures, so the peak
+    is reached there. Releasing them first lowers the peak (reported 21 -> 11 GB on a 23 GB card in
+    microsoft/TRELLIS.2 issue 188, first reported by rpep) without changing the mesh. Re-implemented from the
+    issue text.
+    """
+    import gc
+    import torch
+    from trellis2.representations import MeshWithVoxel
+    from trellis3.memory import free_device_cache
+    meshes, subs = pipeline.decode_shape_slat(shape_slat, resolution)
+    shape_slat = None                      # the caller keeps its own copies on the CPU in `state`
+    tex_voxels = pipeline.decode_tex_slat(tex_slat, subs)
+    tex_slat = subs = None
+    gc.collect()
+    free_device_cache()
+    out = []
+    for m, v in zip(meshes, tex_voxels):
+        m.fill_holes()
+        out.append(MeshWithVoxel(m.vertices, m.faces, origin=[-0.5, -0.5, -0.5], voxel_size=1 / resolution,
+                                 coords=v.coords[:, 1:], attrs=v.feats,
+                                 voxel_shape=torch.Size([*v.shape, *v.spatial_shape]),
+                                 layout=pipeline.pbr_attr_layout))
+    return out
+
+
+def decode_state(pipeline, state, log=print, lean=True):
+    """Decode a completed state into a MeshWithVoxel (upstream decode_latent, lean by default)."""
     for k in ("shape_feats", "shape_coords", "tex_feats", "res"):
         if k not in state:
             raise ValueError(f"state is incomplete: missing {k} (done={state.get('done')})")
     t0 = time.time()
     shape_slat = _make_sparse(state["shape_feats"], state["shape_coords"], pipeline.device)
     tex_slat = shape_slat.replace(state["tex_feats"].to(pipeline.device))
-    out = pipeline.decode_latent(shape_slat, tex_slat, state["res"])
+    if lean and hasattr(pipeline, "decode_shape_slat") and hasattr(pipeline, "decode_tex_slat"):
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+        except Exception:
+            pass
+        out = decode_latent_lean(pipeline, shape_slat, tex_slat, state["res"])
+    else:
+        out = pipeline.decode_latent(shape_slat, tex_slat, state["res"])
     mesh = out[0] if isinstance(out, list) else out
-    log(f"  decode: {mesh.vertices.shape[0]:,} vertices ({time.time() - t0:.0f}s)")
+    peak = _peak_gb()
+    log(f"  decode: {mesh.vertices.shape[0]:,} vertices ({time.time() - t0:.0f}s)"
+        + (f", peak GPU {peak:.1f} GB" if peak else ""))
     return mesh

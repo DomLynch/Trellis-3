@@ -60,6 +60,8 @@ def build_parser():
     p.add_argument("--pixal-resident", action="store_true",
                    help="--preset pixal3d: keep all Pixal3D models on the GPU (no low_vram). With --pipeline-type 1536_cascade "
                         "this is Pixal3D's maximum setting; needs the 32 GB GPU share")
+    p.add_argument("--allow-battery", action="store_true",
+                   help="Start a GPU run even though the laptop is discharging (default: refuse, exit 5)")
     p.add_argument("--fusion", choices=["multidiffusion", "stochastic"], default="multidiffusion",
                    help="multidiffusion: average every view at every step (default, N x model calls). "
                         "stochastic: one view per step, cycling (single-image cost)")
@@ -223,6 +225,12 @@ def main(argv=None):
 
     if args.yaws is not None and len(args.yaws) != len(args.images):
         parser.error(f"{len(args.images)} images but {len(args.yaws)} --yaws")
+    if args.device in ("rocm", "cuda") or args.preset == "pixal3d":
+        from trellis3 import power
+        msg = power.refuse_on_battery(args.allow_battery)
+        if msg:
+            print("Error: " + msg)
+            sys.exit(5)
     if args.preset == "pixal3d":
         from trellis3 import pixal3d
         sys.exit(pixal3d.run_from_args(args))
