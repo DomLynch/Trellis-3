@@ -165,6 +165,53 @@ def _face_tangents(vertices, faces, uvs):
     return T, B
 
 
+def vertex_normals_welded(vertices, faces):
+    """Smooth, area-weighted vertex normals of the low mesh, welded by POSITION so UV-seam copies of a vertex share one normal (what the exporter's own vertex
+    normals are: computed before the UV split). [V,3]."""
+    V = np.asarray(vertices, dtype=np.float64)
+    F = np.asarray(faces, dtype=np.int64)
+    fn = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
+    eps = max(float(np.ptp(V, axis=0).max()), 1e-12) * 1e-6
+    _, inv = np.unique(np.round(V / eps).astype(np.int64), axis=0, return_inverse=True)
+    acc = np.zeros((inv.max() + 1, 3))
+    for k in range(3):
+        np.add.at(acc, inv[F[:, k]], fn)
+    n = acc[inv]
+    return (n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-20)).astype(np.float32)
+
+
+def _vertex_tangents(vertices, faces, uvs, normals):
+    """Per-vertex tangent (orthogonalised against `normals`) and handedness, accumulated from the UV-derivative face tangents like a renderer's tangent generator does
+    (per UV-split vertex). [V,3], [V,1]."""
+    T, B = _face_tangents(vertices, faces, uvs)
+    V = np.asarray(vertices, dtype=np.float64)
+    F = np.asarray(faces, dtype=np.int64)
+    area = np.linalg.norm(np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]]), axis=1)[:, None]
+    nf = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
+    nf /= np.maximum(np.linalg.norm(nf, axis=1, keepdims=True), 1e-20)
+    hand = np.sign((np.cross(nf, T) * B).sum(1, keepdims=True))
+    hand[hand == 0] = 1
+    tv = np.zeros((len(V), 3)); hv = np.zeros((len(V), 1))
+    for k in range(3):
+        np.add.at(tv, F[:, k], T * area)
+        np.add.at(hv, F[:, k], hand * area)
+    t = tv - normals * (tv * normals).sum(1, keepdims=True)
+    t /= np.maximum(np.linalg.norm(t, axis=1, keepdims=True), 1e-20)
+    h = np.where(hv >= 0, 1.0, -1.0)
+    return t.astype(np.float32), h.astype(np.float32)
+
+
+def _barycentric(p, tri):
+    a, b, c = tri[:, 0], tri[:, 1], tri[:, 2]
+    v0, v1, v2 = b - a, c - a, p - a
+    d00, d01, d11 = (v0 * v0).sum(1), (v0 * v1).sum(1), (v1 * v1).sum(1)
+    d20, d21 = (v2 * v0).sum(1), (v2 * v1).sum(1)
+    den = np.where(np.abs(d00 * d11 - d01 * d01) < 1e-30, 1e-30, d00 * d11 - d01 * d01)
+    v = (d11 * d20 - d01 * d21) / den
+    w = (d00 * d21 - d01 * d20) / den
+    return np.stack([1 - v - w, v, w], axis=1).astype(np.float32)
+
+
 def _rasterize(vertices, faces, uvs, texture_size, v_down):
     """UV rasteriser that also returns the covering face id per texel."""
     from backends.texture_baker import _rasterize_uv_triangles
@@ -187,12 +234,17 @@ def _rasterize(vertices, faces, uvs, texture_size, v_down):
 
 
 def bake_normal_map(low_vertices, low_faces, low_uvs, hires, texture_size=2048,
-                    v_down=False, smooth=True, dilate=8, log=print):
+                    v_down=False, smooth=True, dilate=8, log=print, low_normals=None, shading="smooth"):
     """Tangent-space normal map of `hires` baked onto the low mesh's UV layout.
 
     v_down=True uses the KDTree baker's row convention (row = v); False uses
     the trimesh/glTF convention (row = 1 - v).
     Returns (uint8 [H,W,3], mask [H,W]).
+
+    shading="smooth" (default): the map is encoded in the frame a glTF renderer rebuilds, i.e. the INTERPOLATED VERTEX normal of the low mesh (`low_normals`, else welded
+    area-weighted normals of the low mesh) and tangents generated per vertex from the UV derivatives. The exported GLB carries smooth vertex normals, so a map encoded
+    against the FLAT face normal ("flat", the pre-2026-11-02 behaviour, kept for comparison) is decoded against a different base normal and prints the low-poly triangle
+    layout as crystal shards (tests/test_normal_map_frame.py measures both).
     """
     t0 = time.time()
     V = np.asarray(low_vertices, dtype=np.float32)
@@ -207,17 +259,28 @@ def bake_normal_map(low_vertices, low_faces, low_uvs, hires, texture_size=2048,
     cp, fid, bary, _ = hires.query(p)
     n_hi = hires.normal(fid, bary, smooth=smooth)
 
-    # Low-res shading normal = face normal (flat); tangent frame per face.
     tri = V[F]
-    n_lo = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
-    n_lo /= np.maximum(np.linalg.norm(n_lo, axis=1, keepdims=True), 1e-20)
-    t, b, n = T[lf], B[lf], n_lo[lf]
-    # Gram-Schmidt so the frame is orthonormal even on sheared UVs.
-    t = t - n * (t * n).sum(1, keepdims=True)
-    t /= np.maximum(np.linalg.norm(t, axis=1, keepdims=True), 1e-20)
-    handed = np.sign((np.cross(n, t) * b).sum(1, keepdims=True))
-    handed[handed == 0] = 1
-    b = np.cross(n, t) * handed
+    if shading == "flat":   # old behaviour: face normal, face tangents
+        n_lo = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+        n_lo /= np.maximum(np.linalg.norm(n_lo, axis=1, keepdims=True), 1e-20)
+        t, b, n = T[lf], B[lf], n_lo[lf]
+        t = t - n * (t * n).sum(1, keepdims=True)
+        t /= np.maximum(np.linalg.norm(t, axis=1, keepdims=True), 1e-20)
+        handed = np.sign((np.cross(n, t) * b).sum(1, keepdims=True))
+        handed[handed == 0] = 1
+        b = np.cross(n, t) * handed
+    else:   # what the renderer interpolates: vertex normals, vertex tangents, handedness
+        Nv = np.asarray(low_normals, dtype=np.float32) if low_normals is not None else vertex_normals_welded(V, F)
+        Tv, Hv = _vertex_tangents(V, F, UV, Nv)
+        bary_lo = _barycentric(p, tri[lf])
+        fl = F[lf]
+        n = (Nv[fl] * bary_lo[..., None]).sum(1)
+        n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-20)
+        t = (Tv[fl] * bary_lo[..., None]).sum(1)
+        t = t - n * (t * n).sum(1, keepdims=True)
+        t /= np.maximum(np.linalg.norm(t, axis=1, keepdims=True), 1e-20)
+        handed = np.where((Hv[fl] * bary_lo[..., None]).sum(1) >= 0, 1.0, -1.0)
+        b = np.cross(n, t) * handed
     # Normal map convention: +Y of the map follows +V in the texture (glTF/OpenGL).
     ts = np.stack([(n_hi * t).sum(1), (n_hi * b).sum(1), (n_hi * n).sum(1)], axis=1)
     ts[:, 2] = np.maximum(ts[:, 2], 0.0)           # never point into the surface
