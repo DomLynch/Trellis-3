@@ -252,6 +252,11 @@ def main(argv=None):
           f"texture={'none' if cfg['no_texture'] else cfg['texture_size']} bake_faces={cfg['bake_faces']} "
           f"normal_map={cfg['normal_map']} max_tokens={cfg['max_num_tokens']}")
 
+    from trellis3.presets import hero_runtime_defaults
+    hero = hero_runtime_defaults(args.preset, os.environ)
+    if hero:
+        print("hero runtime: " + ", ".join(f"{k}={v} ({src})" for k, v, src in hero) + "  [0 turns a feature off; set the variable to override]")
+
     if args.attn_auto_gb is not None:
         os.environ["ATTN_AUTO_GB"] = str(args.attn_auto_gb)
     if args.attn_tile:
