@@ -75,6 +75,22 @@ def test_latents_are_unreferenced_when_holes_are_filled(monkeypatch):
     assert out.kw["attrs"].device.type == "cpu" and out.kw["coords"].shape == (2, 3)   # attribute volume kept off the device
 
 
+def test_decode_runs_without_autograd(monkeypatch):
+    """The root cause of the 1024/1536 decode OOMs: the decoders were called with grad enabled, so their activations were all kept for a backward pass."""
+    reps = types.ModuleType("trellis2.representations")
+    reps.MeshWithVoxel = _MWV
+    monkeypatch.setitem(sys.modules, "trellis2.representations", reps)
+    seen = {}
+
+    class P(_pipe([]).__class__):
+        def decode_shape_slat(self, slat, res):
+            seen["grad"] = torch.is_grad_enabled()
+            return super().decode_shape_slat(slat, res)
+
+    stages._decode_lean(P(), [_Slat(None, None), _Slat(None, None)], 512)
+    assert seen["grad"] is False
+
+
 def test_offload_state_moves_only_device_tensors_and_keeps_values():
     st = {"a": torch.arange(3), "n": 5, "s": "x"}
     assert stages._offload_state(st) == []   # CPU tensors stay

@@ -376,6 +376,15 @@ def _offload_state(state):
 
 
 def _decode_lean(pipeline, slats, resolution, attrs_to_cpu=True):
+    """Runs under torch.no_grad(): upstream decorates only `run` / `decode_latent` with no_grad, and this module calls `decode_shape_slat` / `decode_tex_slat`
+    directly, so without it the decoder's weights (requires_grad) keep the whole autograd graph of the 20+ ConvNeXt blocks alive: measured 2026-11-02, the 1024 head
+    decode reached 46 GB allocated and ran out of memory at stage 2, where a no_grad pass peaks at 13.5 GB; the same OOM killed the 1536 job on an 80 GB A100."""
+    import torch
+    with torch.no_grad():
+        return _decode_lean_nograd(pipeline, slats, resolution, attrs_to_cpu)
+
+
+def _decode_lean_nograd(pipeline, slats, resolution, attrs_to_cpu=True):
     """Shape decode, texture decode, release, hole filling. `slats` is [shape_slat, tex_slat] and is emptied here, so the caller keeps no reference
     and the tensors really are freed before `Mesh.fill_holes()` builds its adjacency structures."""
     import gc

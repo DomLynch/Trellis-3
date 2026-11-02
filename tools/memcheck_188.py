@@ -64,6 +64,8 @@ def main():
     ap.add_argument("--mode", choices=["baseline", "lean"], required=True)
     ap.add_argument("--tile", type=int, default=0, help="tile_voxels for --mode lean (0 = off)")
     ap.add_argument("--export-texture-size", type=int, default=0, help="also run export_mesh at this texture size (0 = decode only)")
+    ap.add_argument("--bake-faces", type=int, default=200000, help="export bake faces (hero: 2000000)")
+    ap.add_argument("--normal-map", action="store_true", help="export a normal map (hero)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--allow-battery", action="store_true")
     a = ap.parse_args()
@@ -109,7 +111,7 @@ def main():
     if a.export_texture_size:
         torch.cuda.reset_peak_memory_stats()
         t1 = time.time()
-        paths = export_mesh(mesh, os.path.join(out, f"{a.mode}_t{a.tile}"), texture_size=a.export_texture_size, log=runner.log)
+        paths = export_mesh(mesh, os.path.join(out, f"{a.mode}_t{a.tile}"), texture_size=a.export_texture_size, bake_faces=a.bake_faces, normal_map=a.normal_map, log=runner.log)
         torch.cuda.synchronize()
         import trimesh
         g = trimesh.load(paths["glb"], force="mesh")
