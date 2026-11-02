@@ -114,6 +114,20 @@ def _view(path, color):
     im.save(path)
 
 
+def test_project_texture_chunked_equals_single_chunk(tmp_path):
+    from PIL import Image
+    _quad_glb(str(tmp_path / 'q.glb'))
+    _view(tmp_path / 'a.png', (200, 30, 0, 255))
+    _view(tmp_path / 'b.png', (0, 60, 180, 255))
+    views = [f"{tmp_path / 'a.png'}:0", f"{tmp_path / 'b.png'}:0:0.5"]
+    outs = []
+    for chunk in (4_000_000, 300):                     # one chunk vs many small chunks
+        pj.project_texture(str(tmp_path / 'q.glb'), str(tmp_path / f'o{chunk}.glb'), views, fit=False, size=64,
+                           out_png=str(tmp_path / f'o{chunk}.png'), chunk=chunk, log=lambda *_: None)
+        outs.append(np.asarray(Image.open(tmp_path / f'o{chunk}.png')).astype(int))
+    assert np.abs(outs[0] - outs[1]).max() <= 1
+
+
 def test_project_texture_end_to_end_size_png_and_front_only(tmp_path):
     from PIL import Image
     _quad_glb(str(tmp_path / "q.glb"))

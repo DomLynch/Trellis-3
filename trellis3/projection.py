@@ -268,11 +268,13 @@ class Accumulator:
         self.maxw = np.zeros(n, np.float32)
         self.sharp = sharp
 
-    def add(self, col, w):
-        ww = (w.astype(np.float32)) ** self.sharp
-        self.num += col.astype(np.float32) * ww[:, None]
-        self.den += ww
-        np.maximum(self.maxw, w.astype(np.float32), out=self.maxw)
+    def add(self, col, w, sl=slice(None)):
+        """Add one view's colours/weights for the texels in `sl` (a chunk of the full texel list)."""
+        w = w.astype(np.float32)
+        ww = w ** self.sharp
+        self.num[sl] += col.astype(np.float32) * ww[:, None]
+        self.den[sl] += ww
+        np.maximum(self.maxw[sl], w, out=self.maxw[sl])
 
     def result(self, base, tau):
         view = self.num / np.maximum(self.den, 1e-12)[:, None]
@@ -346,7 +348,7 @@ def project_texture(glb_in, glb_out, view_specs, tau=0.15, sharp=2.0, power=3.0,
             wt = wf * wa * vis * inside * vweight
             if front_only is not None and vi > 0:
                 wt = np.where(front_only[sl], 0.0, wt)
-            acc.add(sample_image(rgb, x, y), wt)
+            acc.add(sample_image(rgb, x, y), wt, sl)
             seen += int((wt > 0.05).sum())
         report.append({"view": path, "weight": vweight, "yaw_nominal": yaw, "yaw_fit": round(fitp["yaw"], 1), "iou": fitp["iou"],
                        "texels_seen_pct": round(100 * seen / n, 1)})
