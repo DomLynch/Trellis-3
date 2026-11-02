@@ -136,6 +136,28 @@ def install_raw_saver_and_fill_holes(prefix):
     mesh_base.Mesh.fill_holes = fill_holes
 
 
+def install_fill_holes_only(prefix):
+    """Only the Mesh.fill_holes replacement of install_raw_saver_and_fill_holes (no decode or sampler hooks): saves the decoded raw mesh
+    to <prefix>_mesh.pt the first time it is called and logs that cumesh hole filling was skipped on this ROCm build."""
+    import torch
+    from pixal3d.representations.mesh import base as mesh_base
+    saved = {"mesh": False}
+
+    def fill_holes(self, max_hole_perimeter=3e-2):
+        if not saved["mesh"]:
+            saved["mesh"] = True
+            try:
+                torch.save({"vertices": self.vertices.cpu(), "faces": self.faces.cpu()}, prefix + "_mesh.pt")
+                print(f"[raw] decoded raw mesh ({self.vertices.shape[0]:,} verts, {self.faces.shape[0]:,} faces) saved -> "
+                      f"{prefix}_mesh.pt", flush=True)
+            except Exception as e:  # noqa: BLE001
+                print(f"[raw] could not save the raw mesh: {e}", flush=True)
+        print("[fill_holes] SKIPPED on this ROCm build (cumesh init crashes, io.hip:125); the CPU GLB port closes simple holes "
+              "after decimation", flush=True)
+
+    mesh_base.Mesh.fill_holes = fill_holes
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True)
