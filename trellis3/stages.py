@@ -444,11 +444,14 @@ def decode_state(pipeline, state, log=print, lean=True, tile_voxels=None, attrs_
         except Exception:
             pass
         dec = (getattr(pipeline, "models", None) or {}).get("shape_slat_decoder")
+        tex_dec = (getattr(pipeline, "models", None) or {}).get("tex_slat_decoder")
         if dec is not None:
             from trellis3 import decoder_tiling
             tile = decoder_tiling.install(dec, tile_voxels)
+            if tex_dec is not None:
+                decoder_tiling.install(tex_dec, tile_voxels)   # the texture decoder is the same network, guided by the shape decoder's subdivisions
             if tile:
-                log(f"  shape decoder: last two stages in {tile}-voxel tiles")
+                log(f"  shape and texture decoders: last two stages in {tile}-voxel tiles")
         slats = [_make_sparse(state["shape_feats"], state["shape_coords"], pipeline.device), None]
         slats[1] = slats[0].replace(state["tex_feats"].to(pipeline.device))
         moved = _offload_state(state)
@@ -456,7 +459,7 @@ def decode_state(pipeline, state, log=print, lean=True, tile_voxels=None, attrs_
             log(f"  state tensors moved to the CPU before decoding: {', '.join(moved)}")
         out = _decode_lean(pipeline, slats, state["res"], attrs_to_cpu)
         if dec is not None and getattr(dec, "last_tiles", None):
-            log(f"  tiled decode: {dec.last_tiles} tiles")
+            log(f"  tiled decode: {dec.last_tiles} tiles" + (f" (texture decoder {tex_dec.last_tiles})" if getattr(tex_dec, "last_tiles", None) else ""))
     else:
         shape_slat = _make_sparse(state["shape_feats"], state["shape_coords"], pipeline.device)
         tex_slat = shape_slat.replace(state["tex_feats"].to(pipeline.device))

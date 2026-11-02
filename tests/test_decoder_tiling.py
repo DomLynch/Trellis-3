@@ -87,6 +87,35 @@ def test_two_batch_items_and_a_tile_that_cuts_through(sp_env):
     assert (tiled.feats - base.feats).abs().max().item() <= 1e-4
 
 
+def test_guided_texture_decoder_one_tile_identical_and_many_tiles_match(sp_env):
+    """The texture decoder is the same network with pred_subdiv=False, guided by the shape decoder's subdivisions."""
+    sp, m = sp_env
+    from trellis3 import decoder_tiling
+    torch.manual_seed(5)
+    shape_dec = make_decoder(m)
+    tex = m.SparseUnetVaeDecoder(out_channels=6, model_channels=[8, 8, 8, 8, 8], latent_channels=4, num_blocks=[1, 1, 1, 1, 0],
+                                 block_type=["SparseConvNeXtBlock3d"] * 5, up_block_type=["SparseResBlockC2S3d"] * 5, block_args=[{}] * 5,
+                                 use_fp16=False, pred_subdiv=False).eval()
+    for p in tex.parameters():
+        p.data.normal_(0, 0.3)
+    x = make_latent(sp)
+    base, subs = run(shape_dec, x, 0)
+    xt = x.replace(torch.randn((x.feats.shape[0], 4), generator=torch.Generator().manual_seed(9)))
+
+    def run_tex(tile):
+        decoder_tiling.install(tex, tile)
+        with torch.no_grad():
+            return tex(xt, guide_subs=subs)
+
+    ref = run_tex(0)
+    assert ref.coords.shape[0] == base.coords.shape[0]   # guided: same rows as the shape decode
+    one = run_tex(4096)
+    assert tex.last_tiles == 1 and torch.equal(one.coords, ref.coords) and torch.equal(one.feats, ref.feats)
+    many = run_tex(16)
+    assert tex.last_tiles > 8
+    assert torch.equal(many.coords, ref.coords) and (many.feats - ref.feats).abs().max().item() <= 1e-4
+
+
 def test_margin_is_computed_from_the_convolutions(sp_env):
     sp, m = sp_env
     from trellis3 import decoder_tiling
