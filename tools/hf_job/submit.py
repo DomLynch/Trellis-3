@@ -45,7 +45,7 @@ def main():
             api.upload_file(path_or_fileobj=f, path_in_repo=f"runs/{a.run}/in/{os.path.basename(f)}", repo_id=IO_REPO, repo_type="dataset")
     script = "build_wheels.sh" if a.what == "wheels" else "run_hero.sh"
     boot = (f"pip install -q huggingface_hub && python -c \"from huggingface_hub import hf_hub_download as d;"
-            f"d('{IO_REPO}','bundle/{script}',repo_type='dataset',local_dir='/boot')\" && bash /boot/bundle/{script}")
+            f"d('{IO_REPO}','bundle/{script}',repo_type='dataset',local_dir='/boot')\" && sed -i 's/\\r$//' /boot/bundle/{script} && bash /boot/bundle/{script}")
     cmd = ["hf", "jobs", "run", "--flavor", a.flavor or ("cpu-xl" if a.what == "wheels" else "a100-large"),
            "--timeout", a.timeout or ("90m" if a.what == "wheels" else "3h"), "-s", "HF_TOKEN",
            "-e", f"IO_REPO={IO_REPO}", "-e", f"RUN_NAME={a.run}", "-e", f"GEN_ARGS={a.gen_args}",
