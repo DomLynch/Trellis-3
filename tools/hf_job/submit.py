@@ -49,7 +49,7 @@ def main():
     cmd = ["hf", "jobs", "run", "--flavor", a.flavor or ("cpu-xl" if a.what == "wheels" else "a100-large"),
            "--timeout", a.timeout or ("90m" if a.what == "wheels" else "3h"), "-s", "HF_TOKEN",
            "-e", f"IO_REPO={IO_REPO}", "-e", f"RUN_NAME={a.run}", "-e", f"GEN_ARGS={a.gen_args}",
-           "--name", f"trellis-{a.what}-{a.run}", "-d", IMAGE, "bash", "-lc", boot]
+           "--name", f"trellis-{a.what}-{a.run}", "-d", IMAGE, "bash", "-c", boot]
     print(" ".join(repr(c) if " " in c else c for c in cmd))
     if a.go:
         sys.exit(subprocess.call(cmd))
