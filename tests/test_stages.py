@@ -256,3 +256,46 @@ def test_steps_for():
     assert stages._steps_for({"ss": 4, "all": 7}, "coords") == {"steps": 4}
     assert stages._steps_for({"ss": 4, "all": 7}, "tex") == {"steps": 7}
     assert stages._steps_for({"ss": 4}, "tex") == {}
+
+
+def test_lean_decode_order_and_output(monkeypatch):
+    """decode_shape -> decode_tex -> (release) -> fill_holes, and the same MeshWithVoxel fields as upstream."""
+    order = []
+
+    class Mesh:
+        vertices = torch.zeros((3, 3))
+        faces = torch.tensor([[0, 1, 2]])
+
+        def fill_holes(self):
+            order.append("fill_holes")
+
+    class Vox:
+        coords = torch.zeros((2, 4), dtype=torch.int32)
+        feats = torch.zeros((2, 6))
+        shape = torch.Size([2, 6])
+        spatial_shape = torch.Size([4, 4, 4])
+
+    class MWV:
+        def __init__(self, vertices, faces, **kw):
+            self.vertices, self.faces, self.kw = vertices, faces, kw
+
+    reps = types.ModuleType("trellis2.representations")
+    reps.MeshWithVoxel = MWV
+    monkeypatch.setitem(sys.modules, "trellis2.representations", reps)
+
+    class P:
+        pbr_attr_layout = {"base_color": slice(0, 3)}
+
+        def decode_shape_slat(self, slat, res):
+            order.append("shape")
+            return [Mesh()], ["subs"]
+
+        def decode_tex_slat(self, slat, subs):
+            order.append("tex")
+            assert subs == ["subs"]
+            return [Vox()]
+
+    out = stages.decode_latent_lean(P(), object(), object(), 1024)
+    assert order == ["shape", "tex", "fill_holes"]
+    assert out[0].kw["voxel_size"] == 1 / 1024 and out[0].kw["origin"] == [-0.5, -0.5, -0.5]
+    assert out[0].kw["coords"].shape == (2, 3)
