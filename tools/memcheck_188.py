@@ -27,6 +27,37 @@ def sha(arr):
     return hashlib.sha256(np.ascontiguousarray(arr).tobytes()).hexdigest()
 
 
+class RamWatch:
+    """Samples host memory. With the Variable Graphics Memory split the GPU's allocations come out of system RAM, so "available RAM" reads ~0 during a healthy decode
+    (measured 2026-11-02: a guard with a 2 GB RAM floor killed a healthy 1024 decode). It records the lowest available RAM and the lowest COMMIT headroom, and aborts only
+    when commit headroom drops below `floor_gb`."""
+    def __init__(self, floor_gb=2.0):
+        import threading
+        self.floor, self.lowest, self.lowest_commit, self.stop_flag = floor_gb, None, None, False
+        threading.Thread(target=self.run, daemon=True).start()
+
+    @staticmethod
+    def free_gb():
+        import ctypes
+
+        class MS(ctypes.Structure):
+            _fields_ = [("l", ctypes.c_ulong), ("load", ctypes.c_ulong), ("tp", ctypes.c_ulonglong), ("ap", ctypes.c_ulonglong),
+                        ("tv", ctypes.c_ulonglong), ("av", ctypes.c_ulonglong), ("e1", ctypes.c_ulonglong), ("e2", ctypes.c_ulonglong), ("e3", ctypes.c_ulonglong)]
+        m = MS(); m.l = ctypes.sizeof(MS)
+        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+        return m.ap / 2**30, m.av / 2**30   # available physical RAM, available commit (page file)
+
+    def run(self):
+        while not self.stop_flag:
+            f, c = self.free_gb()
+            self.lowest = f if self.lowest is None else min(self.lowest, f)
+            self.lowest_commit = c if self.lowest_commit is None else min(self.lowest_commit, c)
+            if c < self.floor:
+                print(f"COMMIT GUARD: commit headroom {c:.2f} GB < {self.floor} GB, aborting this measurement before the machine freezes", flush=True)
+                os._exit(7)
+            time.sleep(0.25)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("latents")
@@ -59,6 +90,7 @@ def main():
     from trellis3.runner import Runner
     from trellis3.stages import decode_state
 
+    ram = RamWatch()
     state = load_state(a.latents)
     out = a.out or os.path.join(os.path.dirname(os.path.abspath(a.latents)), "memcheck_188")
     os.makedirs(out, exist_ok=True)
@@ -68,7 +100,8 @@ def main():
     t0 = time.time()
     mesh = decode_state(runner.pipeline, state, log=runner.log, lean=(a.mode == "lean"), attrs_to_cpu=(a.mode == "lean"))
     torch.cuda.synchronize()
-    res = {"mode": a.mode, "tile": a.tile if a.mode == "lean" else 0, "latents": os.path.abspath(a.latents), "res": state.get("res"),
+    res_ram = round(ram.lowest, 2) if ram.lowest is not None else None
+    res = {"mode": a.mode, "lowest_free_ram_gb_to_decode_end": res_ram, "tile": a.tile if a.mode == "lean" else 0, "latents": os.path.abspath(a.latents), "res": state.get("res"),
            "decode_s": round(time.time() - t0, 1), "decode_peak_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
            "vertices": int(mesh.vertices.shape[0]), "faces": int(mesh.faces.shape[0]),
            "positions_sha256": sha(mesh.vertices.detach().float().cpu().numpy()), "faces_sha256": sha(mesh.faces.detach().cpu().numpy()),
@@ -83,6 +116,9 @@ def main():
         res.update(export_s=round(time.time() - t1, 1), export_peak_gb=round(torch.cuda.max_memory_allocated() / 2**30, 2),
                    glb_vertices=int(len(g.vertices)), glb_faces=int(len(g.faces)), glb_positions_sha256=sha(g.vertices.astype("float32")),
                    glb_lean=paths.get("glb_lean"))
+    res["lowest_free_ram_gb_overall"] = round(ram.lowest, 2)
+    res["lowest_commit_headroom_gb"] = round(ram.lowest_commit, 2)
+    ram.stop_flag = True
     print(json.dumps(res))
     with open(os.path.join(out, f"{a.mode}_t{res['tile']}.json"), "w") as f:
         json.dump(res, f, indent=1)
