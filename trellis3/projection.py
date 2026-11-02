@@ -373,6 +373,121 @@ def project_texture(glb_in, glb_out, view_specs, tau=0.15, sharp=2.0, power=3.0,
     return stat
 
 
+def _smoothstep(x, lo, hi):
+    t = np.clip((x - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
+    return t * t * (3 - 2 * t)
+
+
+def project_texture_owner(glb_in, glb_out, view_specs, cameras_json, size=None, out_png=None, front_deg=(75.0, 55.0),
+                          side_power=8.0, tau=0.15, side_tau=0.3, region=True, drop_normal=True, chunk=4_000_000, log=print):
+    """Registered, non-averaging projection.
+
+    cameras_json: from tools/face_register.py solve (per-view cameras solved from facial landmarks, plus 3D landmarks).
+    The FIRST view is the front: it owns every face texel whose normal is within `front_deg` of its axis (full weight
+    inside front_deg[1], fading to zero at front_deg[0]); eyes, brows, nose, mouth and moustache lie inside that cone and
+    come from the front only. All other views only fill where the front does not own the texel, and among them the single
+    best view wins (weight cos**side_power), so nothing is averaged into a double image. Texels outside the face region
+    (hair, bust) and texels no view sees keep the original bake. The output GLB drops its normal map unless drop_normal=False.
+    """
+    import trimesh
+    from PIL import Image
+    from trellis3 import registration as reg
+    t0 = time.time()
+    cams = json.load(open(cameras_json, encoding="utf-8"))
+    scene = trimesh.load(glb_in, process=False)
+    geom = list(scene.geometry.values())[0] if hasattr(scene, "geometry") else scene
+    mat = geom.visual.material
+    tex0 = getattr(mat, "baseColorTexture", None)
+    if tex0 is None:
+        tex0 = Image.new("RGB", (size or 2048,) * 2, (128, 128, 128))
+    if size and tex0.size != (size, size):
+        tex0 = tex0.convert("RGB").resize((size, size), Image.Resampling.LANCZOS)
+    base_tex = np.asarray(tex0.convert("RGB")).copy()
+    H, W = base_tex.shape[:2]
+    uv = np.asarray(geom.visual.uv, np.float64)
+    ys, xs, pos, nrm = texel_geometry(geom, uv[np.asarray(geom.faces)], H, W)
+    pos, nrm = pos.astype(np.float32), nrm.astype(np.float32)
+    n = len(ys)
+    log(f"texels covered: {n:,} of {H * W:,} ({H}x{W})")
+    base = base_tex[ys, xs].astype(np.float32)
+    extent = float(np.ptp(pos[:, 1]))
+    centre = np.array(next(iter(cams["cams"].values()))["centre"], np.float64)
+    face_w = (reg.face_region_weight(pos, cams["mesh3d"], centre) if region else np.ones(n, np.float32))
+    log(f"face region: {100 * float((face_w > 0.5).mean()):.1f}% of texels")
+    views = load_views(view_specs)
+    cos_hi, cos_lo = math.cos(math.radians(front_deg[1])), math.cos(math.radians(front_deg[0]))
+    front_col = np.zeros((n, 3), np.float32)
+    front_w = np.zeros(n, np.float32)
+    side_num = np.zeros((n, 3), np.float32)
+    side_den = np.zeros(n, np.float32)
+    side_max = np.zeros(n, np.float32)
+    report = []
+    for vi, (path, yaw, rgba, vweight) in enumerate(views):
+        key = os.path.basename(path)
+        alpha = rgba[..., 3]
+        h, w = alpha.shape
+        cam = cams["cams"].get(key)
+        if cam is None:
+            log(f"  view {key}: no solved camera (no landmarks picked), skipped")
+            continue
+        zb = np.full((h // 2 + 1, w // 2 + 1), -1e9, np.float32)
+        for i in range(0, n, chunk):
+            x, y, z = reg.project_cam(pos[i:i + chunk], cam, centre)
+            depth_buffer(x * 0.5, y * 0.5, z, zb.shape, zb)
+        _, _, d = view_basis(cam["yaw"])
+        ealpha = _erode_alpha(alpha)
+        rgb = np.ascontiguousarray(rgba[..., :3])
+        seen = 0
+        for i in range(0, n, chunk):
+            sl = slice(i, i + chunk)
+            x, y, z = reg.project_cam(pos[sl], cam, centre)
+            vis = depth_test(zb, x * 0.5, y * 0.5, z, extent)
+            cosv = np.abs(nrm[sl] @ d.astype(np.float32))
+            wa = sample_image(ealpha, x, y)[:, 0] / 255.0
+            inside = (x >= 0) & (x < w - 1) & (y >= 0) & (y < h - 1)
+            ok = (vis & inside) * wa
+            col = sample_image(rgb, x, y).astype(np.float32)
+            if vi == 0:
+                wf = _smoothstep(cosv, cos_lo, cos_hi) * ok * face_w[sl]
+                front_col[sl], front_w[sl] = col, wf
+                seen += int((wf > 0.05).sum())
+            else:
+                wc = cosv * ok * vweight * face_w[sl]                    # confidence weight: how well this view sees the texel
+                ws = (cosv ** side_power) * ok * vweight * face_w[sl]    # selection weight: the best side view wins
+                side_num[sl] += col * ws[:, None]
+                side_den[sl] += ws
+                side_max[sl] = np.maximum(side_max[sl], wc)
+                seen += int((wc > 0.1).sum())
+        report.append({"view": path, "role": "front" if vi == 0 else "side", "weight": vweight,
+                       "camera": {k: cam[k] for k in ("kind", "yaw", "rms_px") if k in cam},
+                       "texels_used_pct": round(100 * seen / n, 1)})
+        log(f"  view {key}: cam yaw {cam['yaw']:.1f}, rms {cam.get('rms_px', 0):.1f}px, used {report[-1]['texels_used_pct']}%")
+    side = side_num / np.maximum(side_den, 1e-12)[:, None]
+    side_conf = np.clip(side_max / side_tau, 0.0, 1.0)
+    fallback = side * side_conf[:, None] + base * (1.0 - side_conf)[:, None]
+    new = front_w[:, None] * front_col + (1.0 - front_w)[:, None] * fallback
+    out_tex = base_tex.copy()
+    out_tex[ys, xs] = np.clip(new, 0, 255).astype(np.uint8)
+    covered = np.zeros((H, W), bool)
+    covered[ys, xs] = True
+    out_tex = fill_gutter(out_tex, covered)
+    img = Image.fromarray(out_tex)
+    if out_png:
+        img.save(out_png)
+    mat.baseColorTexture = img
+    if drop_normal and getattr(mat, "normalTexture", None) is not None:
+        mat.normalTexture = None
+    scene.export(glb_out)
+    stat = {"glb_in": glb_in, "glb_out": glb_out, "mode": "owner", "texture": [W, H], "views": report,
+            "front_deg": list(front_deg), "side_power": side_power, "tau": tau, "normal_map_dropped": bool(drop_normal),
+            "front_owned_pct": round(100 * float((front_w > 0.5).mean()), 1),
+            "side_filled_pct": round(100 * float(((front_w < 0.5) & (side_conf > 0.5)).mean()), 1),
+            "seconds": round(time.time() - t0, 1)}
+    json.dump(stat, open(glb_out + ".projection.json", "w"), indent=1)
+    log(json.dumps(stat))
+    return stat
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("glb_in")
@@ -386,9 +501,17 @@ def main(argv=None):
     ap.add_argument("--no-fit", action="store_true", help="trust the nominal poses")
     ap.add_argument("--size", type=int, default=None, help="output texture side in pixels (default: the GLB's own, e.g. 8192)")
     ap.add_argument("--out-png", default=None, help="also write the new base-colour texture as a PNG")
+    ap.add_argument("--cameras", default=None,
+                    help="cameras.json from tools/face_register.py solve: use the landmark-registered cameras and the "
+                         "front-owned, non-averaging blend (the first --view is the front)")
+    ap.add_argument("--keep-normal", action="store_true", help="owner mode drops the normal map by default")
     ap.add_argument("--front-only-mask", default=None,
                     help="UV-space mask image; white texels (eyes, mouth interior) are painted by the first view only")
     a = ap.parse_args(argv)
+    if a.cameras:
+        project_texture_owner(a.glb_in, a.glb_out, a.view, a.cameras, size=a.size, out_png=a.out_png,
+                              tau=a.tau, drop_normal=not a.keep_normal)
+        return
     project_texture(a.glb_in, a.glb_out, a.view, a.tau, a.sharp, fit=not a.no_fit, size=a.size,
                     out_png=a.out_png, front_only_mask=a.front_only_mask)
 

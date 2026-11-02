@@ -86,3 +86,25 @@ and then aborted the HIP runtime (`c10::cuda::SetDevice`, python.exe fault 0xc00
 
 Hero (1536) shape sampling with 4 views and multidiffusion needs about 34 GB at 67k tokens, over the 32 GB dedicated share; the 1024
 cascade runs at about 86 s per step. Pixal3D-MV loads about 22 GB of flow models: `tools/pixal3d_entry.py` loads them lazily (one at a time).
+
+## Registered, front-owned projection (for faces)
+
+Silhouette fitting can match an outline while features sit a centimetre off, and averaging misregistered views gives a ghosted face
+(double moustache, extra eyes). For faces use landmark registration plus an owner blend:
+
+```bash
+python tools/face_register.py render mesh.glb reg --yaws 0 90                # exact-camera renders of the mesh, with grids
+python tools/face_register.py crop cut_front.png reg/front_crop.png 1000 700 3100 3700 0.4 100    # zoomed grid crops to pick on
+python tools/face_register.py solve reg/landmarks.json reg/solve               # cameras.json + overlays
+python -m trellis3.projection mesh.glb mesh_proj2.glb --cameras reg/solve/cameras.json --size 8192 \
+    --view front.png:0 --view tq.png:45:1.0 --view tq_mirror.png:-45:1.0 --view profile.png:90:0.8 --view profile_mirror.png:-90:0.8
+python tools/unlit_closeups.py mesh_proj2.glb out/proj2 reg/solve/cameras.json --yaws 0 45    # unlit close-ups to judge it
+```
+
+Landmarks (picked by eye; `eye_vl`/`eye_vr` = viewer-left/right in the front view, `nose_base`, `mouth_c`, `chin`, `glabella`) are lifted to 3D
+from the mesh render's depth and matched to the picks on each cut-out view. Each view gets an affine camera plus a thin-plate-spline warp so
+every picked feature lands exactly (the photo face is wider than the mesh face, so a rigid camera cannot align them). Mirrored views reuse
+the picks with left/right swapped. The first view owns every face texel within 55 degrees of its axis (fading out at 75), so eyes, brows, nose,
+mouth and moustache come from the front only; the other views fill beyond that and the single best one wins. Hair, bust and the back of the head
+stay the raw bake, and the output GLB drops its normal map. On the 1024 head this removed the ghosting of the averaged projection.
+
