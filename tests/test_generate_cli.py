@@ -14,7 +14,7 @@ def test_parser_accepts_new_options():
         ["img.png", "--preset", "master", "--pipeline-type", "1536_cascade", "--texture-size", "8192",
          "--max-tokens", "20000", "--resident", "--tex-steps", "8", "--two-stage", "--min-free-gb", "3"])
     assert a.preset == "master" and a.pipeline_type == "1536_cascade" and a.texture_size == 8192
-    assert a.tex_steps == 8 and a.two_stage and a.min_free_gb == 3.0 and a.gamma == "auto"
+    assert a.tex_steps == 8 and a.two_stage and a.min_free_gb == 3.0 and a.gamma == 1.0   # default: no colour transform (2026-11-02: auto washed the 1536 head white)
 
 
 def test_parser_rejects_bad_type():
@@ -88,7 +88,7 @@ def test_default_staged_run_saves_latents_and_receipt(img, tmp_path, fake):
     assert fake["steps"] == {"ss": 8, "shape": 8, "tex": 4} and fake["release"] is True
     assert fake["decoded"] == ["coords", "shape", "tex"]
     assert os.path.exists(out + ".latents.pt")
-    assert fake["no_texture"] is True and fake["bake_faces"] == 200000 and fake["gamma"] == "auto"
+    assert fake["no_texture"] is True and fake["bake_faces"] == 200000 and fake["gamma"] == 1.0
     r = json.load(open(out + ".receipt.json"))
     assert r["settings"]["steps_per_stage"] == {"ss": 8, "shape": 8, "tex": 4}
     assert r["settings"]["latents"] == out + ".latents.pt"

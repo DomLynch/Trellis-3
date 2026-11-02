@@ -45,6 +45,28 @@ def gpu_bake_backend():
     return "cuda" if torch.cuda.is_available() else None
 
 
+def gpu_bake_unavailable_reason():
+    """Why gpu_bake_backend() is None, for the log line of the CPU fallback ('' when a GPU baker is usable)."""
+    if gpu_bake_backend() is not None:
+        return ""
+    try:
+        import o_voxel
+        where = getattr(o_voxel, "__file__", None) or "?"
+    except Exception as e:
+        return f"o_voxel does not import ({e!r})"
+    try:
+        import o_voxel.postprocess  # noqa: F401
+    except Exception as e:
+        hint = " (o_voxel resolves to a STUB package: keep the repo's stubs/ dir off PYTHONPATH, bootstrap() appends it last)" if "stubs" in where.replace("\\", "/") else ""
+        return f"o_voxel.postprocess does not import ({e!r}); o_voxel is {where}{hint}"
+    for mod in ("nvdiffrast.torch", "cumesh"):
+        try:
+            __import__(mod)
+        except Exception as e:
+            return f"{mod} does not import ({e!r})"
+    return "torch.cuda.is_available() is False" if not torch.cuda.is_available() else "backend probe returned None"
+
+
 def _metal_bake_available():
     return gpu_bake_backend() is not None
 
@@ -129,7 +151,7 @@ def _bake_normals(obj, uvs, hires, texture_size, v_down, flip_v, in_glb_frame, l
 def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                 bake_faces=200000, metallic_factor=0.0, gamma=None, fix_winding=True,
                 uv_cone_deg=None, uv_smooth=None, normal_map=False, normal_flip_v=False,
-                snap_hires=True, reference_image=None, bake_sampling="trilinear", log=print):
+                snap_hires=True, reference_image=None, bake_sampling="trilinear", log=print, gpu_simplify=None, write_obj=None):
     """Write <output>.glb (+ textures) and <output>.obj. Returns dict of paths.
 
     metallic_factor: pins glTF metallicFactor on the Metal path (upstream 1.0;
@@ -147,13 +169,22 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
         convention is unverified; use this if the map looks vertically off).
     snap_hires: CPU path only — snap texel positions onto the full-res
         mesh before sampling voxel colour.
+    gpu_simplify: GPU baker only. True = the raw decoder mesh stays on the GPU and to_glb (cumesh) decimates it there: no host copy of a 70M-face mesh,
+        no CPU simplify, no CPU winding pass (issue-188 follow-up; env TRELLIS3_GPU_SIMPLIFY=1 when None). Needs the lean to_glb (TRELLIS3_GLB_LEAN != 0).
+    write_obj: also write <output>.obj (the raw mesh as text). None = only when the mesh has at most 5M faces (env TRELLIS3_OBJ=1 forces it): a 70M-face OBJ is hours and GBs.
     bake_sampling: CPU path only — "trilinear" (the official bake's maths,
         default) or "knn" (upstream trellis-mac's inverse-distance average).
     """
-    verts = mesh_out.vertices.cpu().numpy()
-    faces = mesh_out.faces.cpu().numpy()
-    if verts.shape[0] == 0 or faces.shape[0] == 0:
+    n_verts, n_faces = int(mesh_out.vertices.shape[0]), int(mesh_out.faces.shape[0])
+    if n_verts == 0 or n_faces == 0:
         raise RuntimeError("decoder produced an empty mesh")
+    _host = {}
+
+    def host_mesh():
+        """The raw mesh as numpy, copied from the device only when a stage really needs it (a 70M-face mesh is ~1.3 GB of host memory plus whatever the stage builds)."""
+        if not _host:
+            _host["v"], _host["f"] = mesh_out.vertices.cpu().numpy(), mesh_out.faces.cpu().numpy()
+        return _host["v"], _host["f"]
 
     paths = {}
     glb_path = f"{output}.glb"
@@ -169,21 +200,31 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                 log(f"\nBaking PBR textures via {gpu_backend} ({texture_size}x{texture_size})...")
                 import o_voxel
                 from trellis3.postbake import apply_gamma, set_metallic_factor
-                target_faces = min(bake_faces, len(faces))
-                sv, sf = _simplify(verts, faces, target_faces, log)
-                sv, sf = _fix_winding(sv, sf, fix_winding, log)
-                simp_verts_t = torch.from_numpy(np.ascontiguousarray(sv)).float().to(bake_dev)
-                simp_faces_t = torch.from_numpy(np.ascontiguousarray(sf).astype("int32")).to(bake_dev)
+                target_faces = min(bake_faces, n_faces)
+                from trellis3 import glb_lean
+                to_glb, late = glb_lean.get_to_glb()   # attribute volume reaches the GPU only for the bake (issue 188)
+                on_gpu = late and (os.environ.get("TRELLIS3_GPU_SIMPLIFY") == "1" if gpu_simplify is None else bool(gpu_simplify))
+                if on_gpu:
+                    log(f"  GPU-side simplify: the {n_faces:,}-face raw mesh stays on the GPU; to_glb decimates it to ~{target_faces:,} (no host copy, no CPU simplify)")
+                    simp_verts_t = mesh_out.vertices.to(bake_dev).float()
+                    simp_faces_t = mesh_out.faces.to(bake_dev).int()
+                    n_simp = n_faces
+                else:
+                    verts, faces = host_mesh()
+                    sv, sf = _simplify(verts, faces, target_faces, log)
+                    sv, sf = _fix_winding(sv, sf, fix_winding, log)
+                    simp_verts_t = torch.from_numpy(np.ascontiguousarray(sv)).float().to(bake_dev)
+                    simp_faces_t = torch.from_numpy(np.ascontiguousarray(sf).astype("int32")).to(bake_dev)
+                    n_simp = len(sf)
+                paths["gpu_simplify"] = bool(on_gpu)
                 uv_kwargs = {}
                 if uv_cone_deg is not None:
                     uv_kwargs["mesh_cluster_threshold_cone_half_angle_rad"] = np.radians(uv_cone_deg)
                 if uv_smooth is not None:
                     uv_kwargs["mesh_cluster_smooth_strength"] = uv_smooth
-                from trellis3 import glb_lean
-                to_glb, late = glb_lean.get_to_glb()   # attribute volume reaches the GPU only for the bake (issue 188)
                 paths["glb_lean"] = late
                 t_glb = time.time()
-                log(f"  to_glb start ({len(sf):,} faces, texture {texture_size}); its verbose stage prints follow")
+                log(f"  to_glb start ({n_simp:,} faces in, texture {texture_size}); its verbose stage prints follow")
                 glb = to_glb(
                     vertices=simp_verts_t,
                     faces=simp_faces_t,
@@ -198,6 +239,7 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                     **uv_kwargs,
                 )
                 log(f"  to_glb done ({time.time() - t_glb:.0f}s)")
+                del simp_verts_t, simp_faces_t
                 if set_metallic_factor(glb, metallic_factor):
                     log(f"  metallicFactor pinned to {metallic_factor}")
                 if gamma == "auto":
@@ -216,7 +258,7 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                     log(f"  gamma {gamma}: base colour left as baked (no gamma applied)")
                 paths["gamma"] = gamma
                 if normal_map:
-                    hires = _hires_index(verts, faces, log)
+                    hires = _hires_index(*host_mesh(), log)
                     nimg = _bake_normals(glb, glb.visual.uv, hires, texture_size,
                                          v_down=False, flip_v=normal_flip_v,
                                          in_glb_frame=True, log=log)
@@ -232,10 +274,12 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                 use_metal = False
 
         if not use_metal:
-            log(f"\nBaking PBR textures on CPU ({texture_size}x{texture_size}, {bake_sampling})...")
+            why_cpu = "the GPU bake raised (see above)" if (has_voxels and gpu_bake_backend()) else (gpu_bake_unavailable_reason() or "not available")
+            log(f"\nBaking PBR textures on CPU ({texture_size}x{texture_size}, {bake_sampling}); GPU baker not used: {why_cpu}")
             from backends.texture_baker import uv_unwrap, bake_texture, build_textured_mesh
             from trellis3.postbake import apply_gamma, auto_gamma, set_metallic_factor
 
+            verts, faces = host_mesh()
             target_faces = min(bake_faces, len(faces))
             bv, bf = _simplify(verts, faces, target_faces, log)
             bv, bf = _fix_winding(bv, bf, fix_winding, log)
@@ -296,21 +340,27 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
     else:
         log("\nExporting with vertex colors (use --texture-size for PBR textures)...")
         import trimesh
-        trimesh.Trimesh(vertices=verts, faces=faces).export(glb_path)
+        trimesh.Trimesh(vertices=host_mesh()[0], faces=host_mesh()[1]).export(glb_path)
         log(f"Saved: {glb_path}")
         paths["glb"] = glb_path
         paths["bake"] = "none"
 
-    obj_path = f"{output}.obj"
-    with open(obj_path, "w") as f:
-        for v in verts:
-            f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
-        for face in faces:
-            f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
-    log(f"Saved: {obj_path}")
-    paths["obj"] = obj_path
-    paths["vertices"] = int(verts.shape[0])
-    paths["faces"] = int(faces.shape[0])
+    if write_obj is None:
+        write_obj = n_faces <= 5_000_000 or os.environ.get("TRELLIS3_OBJ") == "1"
+    if write_obj:
+        verts, faces = host_mesh()
+        obj_path = f"{output}.obj"
+        with open(obj_path, "w") as f:
+            for v in verts:
+                f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
+            for face in faces:
+                f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
+        log(f"Saved: {obj_path}")
+        paths["obj"] = obj_path
+    else:
+        log(f"  OBJ skipped ({n_faces:,} faces; write_obj=True or TRELLIS3_OBJ=1 forces it)")
+    paths["vertices"] = n_verts
+    paths["faces"] = n_faces
     return paths
 
 

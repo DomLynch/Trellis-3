@@ -21,6 +21,18 @@ def test_the_two_changes_are_in_the_right_order():
     assert glb_lean.get_to_glb() == (glb_lean.to_glb_lean, True)
 
 
+def test_cpu_fallback_reason_names_a_stub_o_voxel(monkeypatch):
+    import sys, types
+    from trellis3 import export as ex
+    stub = types.ModuleType("o_voxel")
+    stub.__file__ = "C:/repo/stubs/o_voxel/__init__.py"
+    monkeypatch.setitem(sys.modules, "o_voxel", stub)
+    monkeypatch.delitem(sys.modules, "o_voxel.postprocess", raising=False)
+    monkeypatch.setattr(ex, "gpu_bake_backend", lambda: None)
+    r = ex.gpu_bake_unavailable_reason()
+    assert "STUB" in r and "PYTHONPATH" in r, r
+
+
 def test_off_switch_returns_upstream(monkeypatch):
     if importlib.util.find_spec("o_voxel") is None:
         pytest.skip("o_voxel not installed here")
@@ -28,6 +40,9 @@ def test_off_switch_returns_upstream(monkeypatch):
     import types, sys
     fake = types.ModuleType("o_voxel.postprocess")
     fake.to_glb = lambda: "upstream"
+    pkg = types.ModuleType("o_voxel")
+    pkg.postprocess = fake   # `import o_voxel.postprocess as pp` reads the attribute of the package
+    monkeypatch.setitem(sys.modules, "o_voxel", pkg)
     monkeypatch.setitem(sys.modules, "o_voxel.postprocess", fake)
     fn, late = glb_lean.get_to_glb()
     assert fn() == "upstream" and late is False

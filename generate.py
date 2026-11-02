@@ -126,8 +126,10 @@ def build_parser():
     bake = p.add_argument_group("bake (Metal path)")
     bake.add_argument("--metallic-factor", type=float, default=0.0,
                       help="Pin glTF metallicFactor (upstream 1.0; default 0.0 = non-metal). -1 leaves upstream")
-    bake.add_argument("--gamma", type=_gamma_arg, default="auto",
-                      help="Base-colour gamma: 'auto' matches the input photo (default), or a number e.g. 1.7, or 0 for none")
+    bake.add_argument("--gamma", type=_gamma_arg, default=1.0,
+                      help="Base-colour gamma, default 1.0 = NO colour transform (max-quality rule: nothing automatic). An explicit number e.g. 1.7, or 'auto' "
+                           "(matches the mean of the input photo; refused under --preset hero: on 2026-11-02 it measured a texture mean of 0.045, picked 2.17 and washed the skin to white). "
+                           "Whatever is used is printed and written to the receipt.")
     bake.add_argument("--no-fix-winding", action="store_true",
                       help="Skip the consistent-winding pass before baking")
     bake.add_argument("--uv-cone-deg", type=float, default=None,
@@ -146,8 +148,8 @@ def build_parser():
 
 def bake_kwargs(args, cfg):
     gamma = args.gamma
-    if gamma == 0:
-        gamma = None
+    if gamma == 0:   # old spelling of "none": an explicit 1.0, never None (None means "the library default", 2.2 on the CPU baker)
+        gamma = 1.0
     return {
         "metallic_factor": None if args.metallic_factor < 0 else args.metallic_factor,
         "gamma": gamma,
@@ -206,6 +208,8 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.preset == "hero" and args.gamma == "auto":
+        parser.error("--gamma auto is refused under --preset hero: nothing automatic in a max-quality run (it washed the 1536 head's skin to white); pass a number or leave the default 1.0")
     if args.yaws is not None and args.images is None and args.image is None:
         parser.error("--yaws needs images")
     if args.images and args.image:
