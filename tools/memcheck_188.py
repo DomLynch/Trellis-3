@@ -96,7 +96,12 @@ def main():
     state = load_state(a.latents)
     out = a.out or os.path.join(os.path.dirname(os.path.abspath(a.latents)), "memcheck_188")
     os.makedirs(out, exist_ok=True)
-    runner = Runner(state["pipeline_type"], decode_only=True)
+    t_start = time.time()
+
+    def stamp(*parts, **kw):   # every stage line of the decode and the export carries the wall time since the start
+        print(f"[{time.time() - t_start:7.0f}s]", *parts, flush=True, **kw)
+
+    runner = Runner(state["pipeline_type"], decode_only=True, log=stamp)
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
     t0 = time.time()

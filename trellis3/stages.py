@@ -463,6 +463,6 @@ def decode_state(pipeline, state, log=print, lean=True, tile_voxels=None, attrs_
         out = pipeline.decode_latent(shape_slat, tex_slat, state["res"])
     mesh = out[0] if isinstance(out, list) else out
     peak = _peak_gb()
-    log(f"  decode: {mesh.vertices.shape[0]:,} vertices ({time.time() - t0:.0f}s)"
+    log(f"  decode: {mesh.vertices.shape[0]:,} vertices, {mesh.faces.shape[0]:,} faces ({time.time() - t0:.0f}s)"
         + (f", peak GPU {peak:.1f} GB" if peak else ""))
     return mesh

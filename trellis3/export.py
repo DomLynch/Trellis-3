@@ -86,7 +86,10 @@ def _simplify(verts_np, faces_np, target_faces, log):
         return verts_np, faces_np
     ratio = 1.0 - (target_faces / len(faces_np))
     log(f"  Simplifying mesh: {len(faces_np):,} -> ~{target_faces:,} faces")
-    return fast_simplification.simplify(verts_np, faces_np, ratio)
+    t0 = time.time()
+    sv, sf = fast_simplification.simplify(verts_np, faces_np, ratio)
+    log(f"  Simplified: {len(sf):,} faces ({time.time() - t0:.0f}s)")   # stage line (issue-188 work): this step alone took ~18 min on a 70M-face hero mesh
+    return sv, sf
 
 
 def _fix_winding(sv, sf, enabled, log):
@@ -179,6 +182,8 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                 from trellis3 import glb_lean
                 to_glb, late = glb_lean.get_to_glb()   # attribute volume reaches the GPU only for the bake (issue 188)
                 paths["glb_lean"] = late
+                t_glb = time.time()
+                log(f"  to_glb start ({len(sf):,} faces, texture {texture_size}); its verbose stage prints follow")
                 glb = to_glb(
                     vertices=simp_verts_t,
                     faces=simp_faces_t,
@@ -192,6 +197,7 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                     verbose=True,
                     **uv_kwargs,
                 )
+                log(f"  to_glb done ({time.time() - t_glb:.0f}s)")
                 if set_metallic_factor(glb, metallic_factor):
                     log(f"  metallicFactor pinned to {metallic_factor}")
                 if gamma == "auto":
@@ -232,9 +238,12 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
             bv, bf = _simplify(verts, faces, target_faces, log)
             bv, bf = _fix_winding(bv, bf, fix_winding, log)
             log("  UV unwrapping with xatlas...")
+            t_uv = time.time()
             new_verts, new_faces, uvs, _ = uv_unwrap(bv, bf)
-            log(f"  UV unwrap: {len(verts):,} -> {len(new_verts):,} vertices")
+            log(f"  UV unwrap: {len(verts):,} -> {len(new_verts):,} vertices ({time.time() - t_uv:.0f}s)")
             hires = _hires_index(verts, faces, log) if (snap_hires or normal_map) else None
+            t_tex = time.time()
+            log(f"  Baking base colour / metallic-roughness ({texture_size}x{texture_size}, {len(new_faces):,} faces)...")
             base_color_img, mr_img, _ = bake_texture(
                 new_verts, new_faces, uvs,
                 mesh_out.coords.cpu().float().numpy(),
@@ -246,6 +255,7 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                 sampling=bake_sampling,
                 gamma=None,                       # applied below, same as the Metal path
             )
+            log(f"  Texture bake done ({time.time() - t_tex:.0f}s)")
             tex_path = f"{output}_basecolor.png"
             normal_img = None
             if normal_map:
@@ -271,7 +281,9 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                 log(f"  gamma {g} applied to base colour")
             paths["gamma"] = g
             glb.visual.material.baseColorTexture.convert("RGB").save(tex_path)
+            t_w = time.time()
             glb.export(glb_path)
+            log(f"  GLB written ({time.time() - t_w:.0f}s)")
             log(f"  Saved: {glb_path}")
             paths["glb"] = glb_path
             paths["basecolor"] = tex_path
