@@ -10,7 +10,9 @@ export HF_HUB_ENABLE_HF_TRANSFER=1
 W=/work; mkdir -p $W/out && cd $W
 python -c "
 import os; from huggingface_hub import snapshot_download
-snapshot_download(os.environ['IO_REPO'], repo_type='dataset', local_dir='$W/io', allow_patterns=['wheels/*','bundle/*','runs/'+os.environ['RUN_NAME']+'/in/*'])"
+snapshot_download(os.environ['IO_REPO'], repo_type='dataset', local_dir='$W/io', allow_patterns=['wheels/*','bundle/*','runs/'+os.environ['RUN_NAME']+'/in/*','runs/'+os.environ['RUN_NAME']+'/out/mesh.latents.pt'])"
+# resume: a previous run of this name that died after sampling left its latents in the dataset repo (the container is gone, the latents are not)
+if [ -f io/runs/${RUN_NAME}/out/mesh.latents.pt ]; then cp io/runs/${RUN_NAME}/out/mesh.latents.pt out/mesh.latents.pt; GEN_ARGS="$GEN_ARGS --resume"; echo "resuming from the saved latents"; fi
 pip install -q --no-deps io/wheels/*.whl
 pip install -q imageio imageio-ffmpeg tqdm easydict opencv-python-headless trimesh "transformers==4.56.0" accelerate safetensors \
   scipy kornia timm xatlas fast-simplification pandas lpips zstandard psutil pillow numpy
@@ -23,6 +25,7 @@ git -C TRELLIS.2 checkout -q "$(cat $W/io/wheels/trellis2.commit)"
 python -c "import patches.mps_compat as m; m.patch_rembg_choice()"
 export TRELLIS3_REMBG=none ATTN_BACKEND=flash_attn SPARSE_ATTN_BACKEND=flash_attn SPARSE_CONV_BACKEND=flex_gemm
 python -c "import flash_attn" 2>/dev/null || export ATTN_BACKEND=sdpa SPARSE_ATTN_BACKEND=sdpa
+export TRELLIS3_TILE_VOXELS=${TILE_VOXELS:-256}   # decoder tiling (memory patch for TRELLIS.2 issue 188); 0 = off. The untiled 1536 decode ran out of memory on an 80 GB A100.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True OPENCV_IO_ENABLE_OPENEXR=1 PYTHONUNBUFFERED=1
 nvidia-smi --query-gpu=name,memory.total --format=csv
 IN=$W/io/runs/${RUN_NAME}/in
@@ -35,6 +38,6 @@ import os
 from huggingface_hub import HfApi
 run = os.environ["RUN_NAME"]
 HfApi().upload_folder(folder_path="/work/out", path_in_repo=f"runs/{run}/out", repo_id=os.environ["IO_REPO"], repo_type="dataset",
-                      ignore_patterns=["*.latents.pt"])
+                      ignore_patterns=[])
 P
 exit $RC
