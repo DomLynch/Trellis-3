@@ -34,6 +34,23 @@ TOKENS_LARGE = 98304
 LARGE_MACHINE_GB = 48
 
 
+# Runtime memory defaults of the hero preset (issue-188 work, measured on the 1536 head: decode 19.9 GiB, export 12.6 GiB RSS-side, vs 48 GB GPU / 49 GB host untiled).
+# Other presets keep today's behaviour. An environment variable already set always wins (0 turns the feature off).
+HERO_RUNTIME_DEFAULTS = {"TRELLIS3_TILE_VOXELS": "256", "TRELLIS3_GPU_SIMPLIFY": "1"}
+
+
+def hero_runtime_defaults(preset, env):
+    """Apply the hero defaults to `env` (os.environ) with setdefault and return the list of (name, value, source) for the log line; [] for any other preset."""
+    if preset != "hero":
+        return []
+    out = []
+    for k, v in HERO_RUNTIME_DEFAULTS.items():
+        src = "environment" if k in env else "hero default"
+        env.setdefault(k, v)
+        out.append((k, env[k], src))
+    return out
+
+
 def default_max_tokens(total_gb=None):
     if total_gb is None:
         try:
