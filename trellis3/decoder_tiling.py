@@ -114,11 +114,14 @@ def tiled_forward(decoder, x, guide_subs=None, return_subs=False):
     keys = torch.unique(torch.cat([coords[:, :1], cell], dim=1), dim=0)   # one tile per (batch, cell)
 
     decoder.last_tiles = int(keys.shape[0])   # for the receipt and the tests
+    import time
+    t_tiles = time.time()
+    tile_log = getattr(decoder, "tile_log", None)
     kept = []            # per tile: (parent index, child feats, child coords) of the core rows
     sub_rows = []        # per tile (predicted subdivision only): (parent index, subdivision feats)
     scale = None
     out_dtype = None
-    for key in keys:
+    for tile_no, key in enumerate(keys, 1):
         b, c0 = key[0], key[1:]
         core = (coords[:, 0] == b) & (cell == c0).all(dim=1)
         lo, hi = c0 * T - margin, (c0 + 1) * T + margin
@@ -146,6 +149,10 @@ def tiled_forward(decoder, x, guide_subs=None, return_subs=False):
         if not guided:
             sub_rows.append((idx[core_in.nonzero().squeeze(1)], sub.feats[core_in]))
         scale, out_dtype = ht._scale, ht.feats.dtype
+        if tile_log is not None:   # progress line per tile: a 1536 decode is minutes of silence otherwise
+            peak = f", peak GPU {torch.cuda.max_memory_allocated() / 2**30:.1f} GB" if torch.cuda.is_available() else ""
+            tile_log(f"  [{'texture' if guided else 'shape'} tile {tile_no}/{keys.shape[0]}] {idx.shape[0]:,} rows in, {rows.shape[0]:,} kept, "
+                     f"{time.time() - t_tiles:.0f}s{peak}")
         del ht, sub, tsubs, parent, rows, n_leaf, tguide
     del feats
 
@@ -183,7 +190,7 @@ def tiled_forward(decoder, x, guide_subs=None, return_subs=False):
     return (out, subs) if return_subs else out
 
 
-def install(decoder, tile_voxels=None, margin=DEFAULT_MARGIN):
+def install(decoder, tile_voxels=None, margin=DEFAULT_MARGIN, log=None):
     """Switch tiling on for one decoder instance (0 = off). Patches the class forward once; returns the tile size in effect."""
     from trellis2.models.sc_vaes import sparse_unet_vae as m
     cls = m.SparseUnetVaeDecoder
@@ -200,4 +207,5 @@ def install(decoder, tile_voxels=None, margin=DEFAULT_MARGIN):
         setattr(cls, _PATCHED, True)
     decoder.tile_voxels = tile_voxels_setting(tile_voxels)
     decoder.tile_margin = margin
+    decoder.tile_log = log   # callable(str) or None: one progress line per tile
     return decoder.tile_voxels

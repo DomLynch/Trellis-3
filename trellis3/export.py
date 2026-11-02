@@ -142,8 +142,15 @@ def _bake_normals(obj, uvs, hires, texture_size, v_down, flip_v, in_glb_frame, l
     if flip_v:
         uv[:, 1] = 1.0 - uv[:, 1]
     log(f"  Baking normal map from full-res mesh ({texture_size}x{texture_size})...")
+    low_n = None
+    try:   # the GLB's own vertex normals are what the renderer interpolates: encode against them (same axis remap as the positions)
+        low_n = np.asarray(obj.vertex_normals, dtype=np.float32)
+        if in_glb_frame:
+            low_n = glb_to_decoder_frame(low_n)
+    except Exception:
+        low_n = None
     img, _ = bake_normal_map(V, np.asarray(obj.faces), uv, hires, texture_size,
-                             v_down=v_down, log=log)
+                             v_down=v_down, log=log, low_normals=low_n)
     attach_normal_map(obj, img)
     return img
 

@@ -447,9 +447,9 @@ def decode_state(pipeline, state, log=print, lean=True, tile_voxels=None, attrs_
         tex_dec = (getattr(pipeline, "models", None) or {}).get("tex_slat_decoder")
         if dec is not None:
             from trellis3 import decoder_tiling
-            tile = decoder_tiling.install(dec, tile_voxels)
+            tile = decoder_tiling.install(dec, tile_voxels, log=log)
             if tex_dec is not None:
-                decoder_tiling.install(tex_dec, tile_voxels)   # the texture decoder is the same network, guided by the shape decoder's subdivisions
+                decoder_tiling.install(tex_dec, tile_voxels, log=log)   # the texture decoder is the same network, guided by the shape decoder's subdivisions
             if tile:
                 log(f"  shape and texture decoders: last two stages in {tile}-voxel tiles")
         slats = [_make_sparse(state["shape_feats"], state["shape_coords"], pipeline.device), None]

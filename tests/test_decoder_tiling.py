@@ -116,6 +116,18 @@ def test_guided_texture_decoder_one_tile_identical_and_many_tiles_match(sp_env):
     assert torch.equal(many.coords, ref.coords) and (many.feats - ref.feats).abs().max().item() <= 1e-4
 
 
+def test_progress_line_per_tile(sp_env):
+    sp, m = sp_env
+    from trellis3 import decoder_tiling
+    dec = make_decoder(m)
+    lines = []
+    decoder_tiling.install(dec, 16, log=lines.append)
+    with torch.no_grad():
+        dec(make_latent(sp), return_subs=True)
+    assert len(lines) == dec.last_tiles > 8
+    assert lines[0].startswith("  [shape tile 1/") and f"tile {dec.last_tiles}/{dec.last_tiles}]" in lines[-1]
+
+
 def test_margin_is_computed_from_the_convolutions(sp_env):
     sp, m = sp_env
     from trellis3 import decoder_tiling
