@@ -233,13 +233,29 @@ def fill_gutter(tex, covered):
 
 
 # ------------------------------------------------------------------ driver
+def parse_view_spec(spec):
+    """'path:yaw[:weight]' -> (path, yaw, weight). A Windows drive colon in the path is left alone."""
+    def num(x):
+        try:
+            return float(x)
+        except ValueError:
+            return None
+    parts = spec.rsplit(":", 2)
+    if len(parts) == 3 and num(parts[1]) is not None and num(parts[2]) is not None and len(parts[0]) > 1:
+        return parts[0], num(parts[1]), num(parts[2])
+    parts = spec.rsplit(":", 1)
+    if len(parts) == 2 and num(parts[1]) is not None and len(parts[0]) > 1:
+        return parts[0], num(parts[1]), 1.0
+    return spec, 0.0, 1.0
+
+
 def load_views(specs):
     from PIL import Image
     out = []
     for s in specs:
-        path, _, yaw = s.rpartition(":") if ":" in s[2:] else (s, "", "0")
+        path, yaw, weight = parse_view_spec(s)
         im = Image.open(path).convert("RGBA")
-        out.append((path, float(yaw), np.asarray(im)))
+        out.append((path, yaw, np.asarray(im), weight))
     return out
 
 
@@ -301,7 +317,7 @@ def project_texture(glb_in, glb_out, view_specs, tau=0.15, sharp=2.0, power=3.0,
         log(f"front-only texels: {int(front_only.sum()):,}")
     acc = Accumulator(n, sharp)
     report = []
-    for vi, (path, yaw, rgba) in enumerate(load_views(view_specs)):
+    for vi, (path, yaw, rgba, vweight) in enumerate(load_views(view_specs)):
         alpha = rgba[..., 3]
         if alpha.min() == 255:
             raise ValueError(f"{path} has no cut-out alpha; run the cut-out step first")
@@ -327,12 +343,12 @@ def project_texture(glb_in, glb_out, view_specs, tau=0.15, sharp=2.0, power=3.0,
             wf = facing_weight(nrm[sl], d, power)
             wa = sample_image(ealpha, x, y)[:, 0] / 255.0
             inside = (x >= 0) & (x < w - 1) & (y >= 0) & (y < h - 1)
-            wt = wf * wa * vis * inside
+            wt = wf * wa * vis * inside * vweight
             if front_only is not None and vi > 0:
                 wt = np.where(front_only[sl], 0.0, wt)
             acc.add(sample_image(rgb, x, y), wt)
             seen += int((wt > 0.05).sum())
-        report.append({"view": path, "yaw_nominal": yaw, "yaw_fit": round(fitp["yaw"], 1), "iou": fitp["iou"],
+        report.append({"view": path, "weight": vweight, "yaw_nominal": yaw, "yaw_fit": round(fitp["yaw"], 1), "iou": fitp["iou"],
                        "texels_seen_pct": round(100 * seen / n, 1)})
         log(f"  view {os.path.basename(path)}: yaw {yaw:g} -> {fitp['yaw']:.1f}, IoU {fitp['iou']}, "
             f"seen {report[-1]['texels_seen_pct']}%")
@@ -360,8 +376,8 @@ def main(argv=None):
     ap.add_argument("glb_in")
     ap.add_argument("glb_out")
     ap.add_argument("--view", action="append", required=True, metavar="IMG:YAW",
-                    help="cut-out RGBA view and its nominal yaw in degrees (repeat per view; front 0, three-quarter 45, "
-                         "profile 90, back 180)")
+                    help="cut-out RGBA view, its nominal yaw in degrees and an optional weight: IMG:YAW[:WEIGHT] (repeat per view; "
+                         "front 0, three-quarter 45, profile 90, back 180; the mirrored profile is 270)")
     ap.add_argument("--tau", type=float, default=0.15, help="view weight at which a texel is fully repainted (default 0.15); "
                                                               "lower repaints more, higher keeps more of the TRELLIS texel")
     ap.add_argument("--sharp", type=float, default=2.0, help="view weight exponent; higher = less blending")

@@ -131,3 +131,10 @@ def test_project_texture_end_to_end_size_png_and_front_only(tmp_path):
     left, right = out[32, 16], out[32, 48]
     assert left[0] > 150 and left[2] < 40               # front-only texel: red only
     assert right[0] > 20 and right[2] > 20              # shared texel: red and blue blended
+
+
+def test_parse_view_spec_windows_paths_and_weights():
+    assert pj.parse_view_spec(r"C:\a\b.png:90") == (r"C:\a\b.png", 90.0, 1.0)
+    assert pj.parse_view_spec(r"C:\a\b.png:90:0.6") == (r"C:\a\b.png", 90.0, 0.6)
+    assert pj.parse_view_spec("C:/a/b.png") == ("C:/a/b.png", 0.0, 1.0)
+    assert pj.parse_view_spec("x.png:270:0.5") == ("x.png", 270.0, 0.5)
