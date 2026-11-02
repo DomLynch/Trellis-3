@@ -69,3 +69,20 @@ near-black texel share of the base colour (texels covered in UV space, luminance
 `tests/test_multiview.py` (conditioning tensor shapes, fusion maths, restore), `tests/test_projection.py` (view geometry, blend, depth test,
 silhouette fit), `tests/test_pixal3d.py` (camera matrices against Pixal3D's example, view directory, command line, preset dispatch),
 `tests/test_generate_cli.py` (`--images`, receipt keys, single-image path unchanged). Set `HIP_VISIBLE_DEVICES=-1` to keep them off the GPU.
+
+## Power: no GPU runs on battery
+
+On the ROG Flow Z13 a power-source change in the middle of a run (AC lost at 12:15, 2026-11-02) throttled the GPU from 86 to 140 s per step
+and then aborted the HIP runtime (`c10::cuda::SetDevice`, python.exe fault 0xc0000409). `generate.py` therefore refuses to start a GPU run
+(`--device rocm|cuda`, or `--preset pixal3d`) while the laptop is discharging and exits with code 5. Override with `--allow-battery` or
+`TRELLIS3_ALLOW_BATTERY=1`. Keep the charger in and use a performance power plan for long runs.
+
+## Measured on the 32 GB ROCm laptop (Radeon 8060S)
+
+| attention | throughput | note |
+|---|---|---|
+| tiled fp32 (`--attn-auto-gb 12`) | 2.2 TFLOPs | exact, about 8x slower |
+| fused SDPA flash (`--attn-auto-gb 0`) | 16-19 TFLOPs | exact, use this |
+
+Hero (1536) shape sampling with 4 views and multidiffusion needs about 34 GB at 67k tokens, over the 32 GB dedicated share; the 1024
+cascade runs at about 86 s per step. Pixal3D-MV loads about 22 GB of flow models: `tools/pixal3d_entry.py` loads them lazily (one at a time).
