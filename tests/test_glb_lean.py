@@ -1,5 +1,6 @@
-"""Export tweaks of the issue-188 memory work: the source edits of trellis3.glb_lean on the installed o_voxel to_glb and on a synthetic source. CPU only."""
+"""Export tweaks of the issue-188 memory work: trellis3.glb_lean is an owned copy of o_voxel's to_glb with two marked changes. CPU only."""
 import importlib.util
+import inspect
 import os
 import re
 
@@ -7,42 +8,45 @@ import pytest
 
 from trellis3 import glb_lean
 
-SYNTH = '''
-def to_glb(vertices, faces, attr_volume, coords, aabb, voxel_size):
-    mesh = cumesh.CuMesh()
-    if not remesh:
-        pass
-    else:
-        center = aabb.mean(dim=0)
-        mesh.init(*cumesh.remeshing.remesh_narrow_band_dc(
-            vertices, faces,
-        ))
-    attrs = torch.zeros(texture_size, texture_size, attr_volume.shape[1], device='cuda')
-    return attrs
-'''
+
+def _own_source():
+    return inspect.getsource(glb_lean.to_glb_lean)
 
 
-def test_all_three_edits_apply_to_the_expected_shape_and_compile():
-    src, applied, skipped = glb_lean.patched_source(SYNTH)
-    assert applied == [r[0] for r in glb_lean.RULES] and skipped == []
-    assert src.index("attr_volume, coords = attr_volume.cuda(), coords.cuda()") < src.index("attrs = torch.zeros")   # moved right before the bake
-    assert src.index("mesh = None") < src.index("remesh_narrow_band_dc")                                         # old CuMesh released first
+def test_the_two_changes_are_in_the_right_order():
+    src = _own_source()
+    assert src.index("attr_volume, coords = attr_volume.cuda(), coords.cuda()") < src.index("attrs = torch.zeros(")   # volume reaches the GPU right before the bake
+    assert src.index("mesh = None") < src.index("remesh_narrow_band_dc(")                                             # old CuMesh released before the remesh
     assert "aabb.mean(dim=0).cuda()" in src
-    compile(src, "<x>", "exec")
+    assert glb_lean.get_to_glb() == (glb_lean.to_glb_lean, True)
 
 
-def test_an_anchor_that_is_gone_is_skipped_not_forced():
-    src, applied, skipped = glb_lean.patched_source("def to_glb():\n    return 1\n")
-    assert applied == [] and len(skipped) == 3 and src.endswith("return 1\n")
+def test_off_switch_returns_upstream(monkeypatch):
+    if importlib.util.find_spec("o_voxel") is None:
+        pytest.skip("o_voxel not installed here")
+    monkeypatch.setenv("TRELLIS3_GLB_LEAN", "0")
+    import types, sys
+    fake = types.ModuleType("o_voxel.postprocess")
+    fake.to_glb = lambda: "upstream"
+    monkeypatch.setitem(sys.modules, "o_voxel.postprocess", fake)
+    fn, late = glb_lean.get_to_glb()
+    assert fn() == "upstream" and late is False
 
 
-def test_installed_upstream_source_still_matches_if_present():
+def _normalise(src):
+    src = re.sub(r"def to_glb(_lean)?\(", "def to_glb(", src)
+    src = re.sub(r"\n    import gc\n.*?    import cumesh\n", "\n", src, flags=re.S)           # heavy imports moved inside the copy
+    src = src.replace("        center = aabb.mean(dim=0).cuda()   # trellis3: aabb may still be on the CPU here\n", "        center = aabb.mean(dim=0)\n")
+    src = re.sub(r"    # trellis3 change 1:.*?\n    attr_volume, coords = attr_volume.cuda\(\), coords.cuda\(\)\n    aabb, voxel_size = aabb.cuda\(\), voxel_size.cuda\(\)\n", "", src)
+    src = re.sub(r"        # trellis3 change 2:.*?\n        mesh = None\n        gc.collect\(\)\n        torch.cuda.empty_cache\(\)\n        mesh = cumesh.CuMesh\(\)\n", "", src)
+    return "\n".join(line.rstrip() for line in src.splitlines() if line.strip())
+
+
+def test_copy_equals_the_installed_function_apart_from_the_marked_changes():
+    """Fails when upstream's to_glb changes, so the owned copy is updated deliberately."""
     spec = importlib.util.find_spec("o_voxel")
     if spec is None or not spec.origin:
         pytest.skip("o_voxel not installed here")
-    path = os.path.join(os.path.dirname(spec.origin), "postprocess.py")
-    text = open(path, encoding="utf-8").read()
-    m = re.search(r"\ndef to_glb\(.*?(?=\n\ndef |\Z)", text, re.S)
-    src, applied, skipped = glb_lean.patched_source(m.group(0))
-    assert "attr_volume_to_gpu_at_the_bake" in applied, skipped
-    compile(src, "<installed to_glb>", "exec")
+    text = open(os.path.join(os.path.dirname(spec.origin), "postprocess.py"), encoding="utf-8").read().replace("\r\n", "\n")
+    upstream = re.search(r"\ndef to_glb\(.*", text, re.S).group(0)
+    assert _normalise(_own_source()) == _normalise(upstream)

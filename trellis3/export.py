@@ -177,8 +177,8 @@ def export_mesh(mesh_out, output, texture_size=1024, no_texture=False,
                 if uv_smooth is not None:
                     uv_kwargs["mesh_cluster_smooth_strength"] = uv_smooth
                 from trellis3 import glb_lean
-                to_glb, late, lean_applied, lean_skipped = glb_lean.get_to_glb()   # attribute volume reaches the GPU only for the bake (issue 188)
-                paths["glb_lean"] = {"applied": lean_applied, "skipped": lean_skipped}
+                to_glb, late = glb_lean.get_to_glb()   # attribute volume reaches the GPU only for the bake (issue 188)
+                paths["glb_lean"] = late
                 glb = to_glb(
                     vertices=simp_verts_t,
                     faces=simp_faces_t,

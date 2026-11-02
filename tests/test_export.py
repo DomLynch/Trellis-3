@@ -71,6 +71,7 @@ def test_metal_path_wiring(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "o_voxel", ov)
     monkeypatch.setitem(sys.modules, "o_voxel.postprocess", pp)
     monkeypatch.setattr(ex, "gpu_bake_backend", lambda: "metal")
+    monkeypatch.setenv("TRELLIS3_GLB_LEAN", "0")   # these tests stub upstream's to_glb; the lean copy has its own tests
 
     m = _Mesh(np.asarray(icos.vertices), faces)
     m.attrs = torch.zeros((1, 6)); m.coords = torch.zeros((1, 3), dtype=torch.int32)
@@ -113,6 +114,7 @@ def test_metal_path_normal_map(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "o_voxel", ov)
     monkeypatch.setitem(sys.modules, "o_voxel.postprocess", pp)
     monkeypatch.setattr(ex, "gpu_bake_backend", lambda: "metal")
+    monkeypatch.setenv("TRELLIS3_GLB_LEAN", "0")   # these tests stub upstream's to_glb; the lean copy has its own tests
     monkeypatch.setattr(ex, "_simplify", lambda v, f, t, log: (v, f))  # keep full mesh
 
     m = _Mesh(np.asarray(icos.vertices), np.asarray(icos.faces))
