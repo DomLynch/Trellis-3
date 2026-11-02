@@ -359,21 +359,33 @@ def _peak_gb():
     return None
 
 
-def decode_latent_lean(pipeline, shape_slat, tex_slat, resolution):
-    """pipeline.decode_latent with the sampling data released before mesh post-processing.
+def _offload_state(state):
+    """Move the state's device tensors (voxel coords, shape and texture latents) to the CPU. The decode builds its own device copies, so
+    the state's would otherwise stay resident next to them for the whole decode (microsoft/TRELLIS.2 issue 188: the sampling tensors are
+    still held when mesh post-processing starts). Values are unchanged; `_make_sparse` moves them back on demand."""
+    moved = []
+    for k, v in list(state.items()):
+        try:
+            import torch
+            if isinstance(v, torch.Tensor) and v.device.type != "cpu":
+                state[k] = v.cpu()
+                moved.append(k)
+        except Exception:
+            pass
+    return moved
 
-    Same maths and the same output as upstream decode_latent. Upstream keeps the shape latent, the texture latent
-    and the decoder's sub-structures alive while `Mesh.fill_holes()` builds its adjacency structures, so the peak
-    is reached there. Releasing them first lowers the peak (reported 21 -> 11 GB on a 23 GB card in
-    microsoft/TRELLIS.2 issue 188, first reported by rpep) without changing the mesh. Re-implemented from the
-    issue text.
-    """
+
+def _decode_lean(pipeline, slats, resolution, attrs_to_cpu=True):
+    """Shape decode, texture decode, release, hole filling. `slats` is [shape_slat, tex_slat] and is emptied here, so the caller keeps no reference
+    and the tensors really are freed before `Mesh.fill_holes()` builds its adjacency structures."""
     import gc
     import torch
     from trellis2.representations import MeshWithVoxel
     from trellis3.memory import free_device_cache
+    shape_slat, tex_slat = slats
+    slats.clear()
     meshes, subs = pipeline.decode_shape_slat(shape_slat, resolution)
-    shape_slat = None                      # the caller keeps its own copies on the CPU in `state`
+    shape_slat = None
     tex_voxels = pipeline.decode_tex_slat(tex_slat, subs)
     tex_slat = subs = None
     gc.collect()
@@ -381,21 +393,40 @@ def decode_latent_lean(pipeline, shape_slat, tex_slat, resolution):
     out = []
     for m, v in zip(meshes, tex_voxels):
         m.fill_holes()
+        # The attribute volume (voxel colours) is only needed at the bake: keep it, and its coordinates, off the device until then.
+        attrs, coords = (v.feats.cpu(), v.coords[:, 1:].cpu()) if attrs_to_cpu else (v.feats, v.coords[:, 1:])
         out.append(MeshWithVoxel(m.vertices, m.faces, origin=[-0.5, -0.5, -0.5], voxel_size=1 / resolution,
-                                 coords=v.coords[:, 1:], attrs=v.feats,
+                                 coords=coords, attrs=attrs,
                                  voxel_shape=torch.Size([*v.shape, *v.spatial_shape]),
                                  layout=pipeline.pbr_attr_layout))
+    meshes = tex_voxels = None
+    gc.collect()
+    free_device_cache()
     return out
 
 
-def decode_state(pipeline, state, log=print, lean=True):
-    """Decode a completed state into a MeshWithVoxel (upstream decode_latent, lean by default)."""
+def decode_latent_lean(pipeline, shape_slat, tex_slat, resolution, attrs_to_cpu=True):
+    """pipeline.decode_latent with the sampling data released before mesh post-processing.
+
+    Same maths and the same mesh as upstream decode_latent. Upstream keeps the shape latent, the texture latent
+    and the decoder's sub-structures alive while `Mesh.fill_holes()` builds its adjacency structures, so the peak
+    is reached there. Releasing them first lowers the peak (reported 21 -> 11 GB on a 23 GB card in
+    microsoft/TRELLIS.2 issue 188, first reported by rpep) without changing the mesh. Re-implemented from the
+    issue text. Also keeps the attribute volume on the CPU until the bake (`attrs_to_cpu`). Callers that hold their own
+    references to the latents (this wrapper's arguments) free nothing until they drop them; `decode_state` passes ownership.
+    """
+    return _decode_lean(pipeline, [shape_slat, tex_slat], resolution, attrs_to_cpu)
+
+
+def decode_state(pipeline, state, log=print, lean=True, tile_voxels=None, attrs_to_cpu=True):
+    """Decode a completed state into a MeshWithVoxel (upstream decode_latent, lean by default).
+
+    tile_voxels: run the shape decoder's last two stages in spatial tiles of this many voxels per side (0 = off; None reads
+    TRELLIS3_TILE_VOXELS, default off); see trellis3.decoder_tiling."""
     for k in ("shape_feats", "shape_coords", "tex_feats", "res"):
         if k not in state:
             raise ValueError(f"state is incomplete: missing {k} (done={state.get('done')})")
     t0 = time.time()
-    shape_slat = _make_sparse(state["shape_feats"], state["shape_coords"], pipeline.device)
-    tex_slat = shape_slat.replace(state["tex_feats"].to(pipeline.device))
     if lean and hasattr(pipeline, "decode_shape_slat") and hasattr(pipeline, "decode_tex_slat"):
         try:
             import torch
@@ -403,8 +434,23 @@ def decode_state(pipeline, state, log=print, lean=True):
                 torch.cuda.reset_peak_memory_stats()
         except Exception:
             pass
-        out = decode_latent_lean(pipeline, shape_slat, tex_slat, state["res"])
+        dec = (getattr(pipeline, "models", None) or {}).get("shape_slat_decoder")
+        if dec is not None:
+            from trellis3 import decoder_tiling
+            tile = decoder_tiling.install(dec, tile_voxels)
+            if tile:
+                log(f"  shape decoder: last two stages in {tile}-voxel tiles")
+        slats = [_make_sparse(state["shape_feats"], state["shape_coords"], pipeline.device), None]
+        slats[1] = slats[0].replace(state["tex_feats"].to(pipeline.device))
+        moved = _offload_state(state)
+        if moved:
+            log(f"  state tensors moved to the CPU before decoding: {', '.join(moved)}")
+        out = _decode_lean(pipeline, slats, state["res"], attrs_to_cpu)
+        if dec is not None and getattr(dec, "last_tiles", None):
+            log(f"  tiled decode: {dec.last_tiles} tiles")
     else:
+        shape_slat = _make_sparse(state["shape_feats"], state["shape_coords"], pipeline.device)
+        tex_slat = shape_slat.replace(state["tex_feats"].to(pipeline.device))
         out = pipeline.decode_latent(shape_slat, tex_slat, state["res"])
     mesh = out[0] if isinstance(out, list) else out
     peak = _peak_gb()
