@@ -73,7 +73,8 @@ def test_run_one_seed_sweep(png, tmp_path, fake_export):
     res = srv.run_one(jid, job)
     assert res["status"] == "done" and len(res["outputs"]) == 3
     assert [c[0] for c in runner.calls] == [1, 2, 3]
-    assert runner.calls[0][1:] == ("1024_cascade", 6, 49152)
+    from trellis3.presets import default_max_tokens
+    assert runner.calls[0][1:] == ("1024_cascade", 6, default_max_tokens())
     assert all(s.startswith(str(tmp_path / "out" / "cat")) for s, _, _ in fake_export)
     assert srv.jobs_done == 1
 
