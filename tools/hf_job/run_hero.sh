@@ -11,7 +11,7 @@ W=/work; mkdir -p $W/out && cd $W
 python -c "
 import os; from huggingface_hub import snapshot_download
 snapshot_download(os.environ['IO_REPO'], repo_type='dataset', local_dir='$W/io', allow_patterns=['wheels/*','bundle/*','runs/'+os.environ['RUN_NAME']+'/in/*'])"
-pip install -q io/wheels/*.whl
+pip install -q --no-deps io/wheels/*.whl
 pip install -q imageio imageio-ffmpeg tqdm easydict opencv-python-headless trimesh transformers accelerate safetensors \
   scipy kornia timm xatlas fast-simplification pandas lpips zstandard psutil pillow numpy
 pip install -q git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
