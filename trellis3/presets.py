@@ -16,6 +16,10 @@ PRESETS = {
     # Hero faces on a 64 GB machine: 1536 shape, 8K textures, 2M-face bake.
     "hero": {"pipeline_type": "1536_cascade", "steps": None, "texture_size": 8192, "no_texture": False,
              "bake_faces": 2_000_000, "normal_map": True, "two_stage": True},
+    # Pixal3D (TencentARC) in its own venv; generate.py hands over to trellis3.pixal3d. Values here only keep the
+    # CLI choices and receipts consistent, the Pixal3D pipeline sets its own resolution and bake.
+    "pixal3d": {"pipeline_type": "1024_cascade", "steps": None, "texture_size": 4096, "no_texture": False,
+                "bake_faces": 1_000_000, "normal_map": False, "two_stage": False},
 }
 
 _BASE = {"pipeline_type": "512", "steps": None, "texture_size": 1024, "no_texture": False,

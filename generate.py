@@ -51,6 +51,12 @@ def build_parser():
     p.add_argument("--images", nargs="+", metavar="IMG", default=None,
                    help="Several views of the same subject (front first, e.g. front three-quarter profile back). "
                         "Fused during sampling; replaces the positional image")
+    p.add_argument("--yaws", nargs="+", type=float, default=None, metavar="DEG",
+                   help="Yaw of each image in degrees (front 0, three-quarter 45, profile 90, back 180). Used by "
+                        "--project and --preset pixal3d; default 0 45 90 180 ... by position")
+    p.add_argument("--project", action="store_true",
+                   help="After baking, repaint the base-colour texture from the posed views (needs RGBA cut-outs); "
+                        "writes <output>_proj.glb next to the TRELLIS glb")
     p.add_argument("--fusion", choices=["multidiffusion", "stochastic"], default="multidiffusion",
                    help="multidiffusion: average every view at every step (default, N x model calls). "
                         "stochastic: one view per step, cycling (single-image cost)")
@@ -195,6 +201,8 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.yaws is not None and args.images is None and args.image is None:
+        parser.error("--yaws needs images")
     if args.images and args.image:
         # `generate.py a.png --images b.png c.png`: the positional one is the first view
         args.images = [args.image] + list(args.images)
@@ -209,6 +217,12 @@ def main(argv=None):
         if not os.path.exists(path):
             print(f"Error: {path} not found")
             sys.exit(1)
+
+    if args.yaws is not None and len(args.yaws) != len(args.images):
+        parser.error(f"{len(args.images)} images but {len(args.yaws)} --yaws")
+    if args.preset == "pixal3d":
+        from trellis3 import pixal3d
+        sys.exit(pixal3d.run_from_args(args))
 
     cfg = apply_preset(args.preset, pipeline_type=args.pipeline_type, steps=args.steps,
                        texture_size=args.texture_size, no_texture=args.no_texture,
