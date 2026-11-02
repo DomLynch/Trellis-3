@@ -72,6 +72,49 @@ def install_lazy_models(max_big=1):
     base.Pipeline.from_pretrained = classmethod(from_pretrained)
 
 
+def install_raw_saver_and_fill_holes(prefix):
+    """Two run-time patches around the decode step (the upstream files stay untouched).
+
+    1. Pixal3DImageTo3DPipeline.decode_latent first saves the sampled latents to <prefix>_latents.pt (a later failure then costs
+       a decode, not the 27 min of sampling).
+    2. Mesh.fill_holes needs cumesh.CuMesh.init, which crashes on this ROCm build (io.hip:125 "invalid argument"). It is replaced
+       by a function that saves the raw decoded mesh to <prefix>_mesh.pt (once) and logs that hole filling was skipped here: small
+       holes are closed afterwards by the CPU GLB port (trimesh fill_holes after decimation, see pixal3d_glb_cpu.py).
+    """
+    import torch
+    from pixal3d.pipelines import pixal3d_image_to_3d as M
+    from pixal3d.representations.mesh import base as mesh_base
+
+    orig_decode = M.Pixal3DImageTo3DPipeline.decode_latent
+
+    @torch.no_grad()
+    def decode_latent(self, shape_slat, tex_slat, resolution):
+        try:
+            torch.save({"shape_feats": shape_slat.feats.cpu(), "shape_coords": shape_slat.coords.cpu(),
+                        "tex_feats": tex_slat.feats.cpu(), "res": int(resolution)}, prefix + "_latents.pt")
+            print(f"[raw] sampled latents saved -> {prefix}_latents.pt", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[raw] could not save latents: {e}", flush=True)
+        return orig_decode(self, shape_slat, tex_slat, resolution)
+
+    M.Pixal3DImageTo3DPipeline.decode_latent = decode_latent
+    saved = {"mesh": False}
+
+    def fill_holes(self, max_hole_perimeter=3e-2):
+        if not saved["mesh"]:
+            saved["mesh"] = True
+            try:
+                torch.save({"vertices": self.vertices.cpu(), "faces": self.faces.cpu()}, prefix + "_mesh.pt")
+                print(f"[raw] decoded raw mesh ({self.vertices.shape[0]:,} verts, {self.faces.shape[0]:,} faces) saved -> "
+                      f"{prefix}_mesh.pt", flush=True)
+            except Exception as e:  # noqa: BLE001
+                print(f"[raw] could not save the raw mesh: {e}", flush=True)
+        print("[fill_holes] SKIPPED on this ROCm build (cumesh init crashes, io.hip:125); the CPU GLB port closes simple holes "
+              "after decimation", flush=True)
+
+    mesh_base.Mesh.fill_holes = fill_holes
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True)
@@ -121,6 +164,7 @@ def main():
         ICP.DinoV3ProjMultiViewFeatureExtractor._project_single_view = per_view
     except Exception as e:  # noqa: BLE001
         print(f"[entry] per-view cache release not installed: {e}", flush=True)
+    install_raw_saver_and_fill_holes(os.path.splitext(os.path.abspath(a.output))[0] + "_raw")
     for c in P.IMAGE_COND_CONFIGS.values():
         c["model_name"] = a.dino_dir
     if a.glb == "cpu":
